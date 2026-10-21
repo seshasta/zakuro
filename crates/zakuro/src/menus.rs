@@ -718,6 +718,9 @@ impl Menus {
                 })
                 .response
                 .on_hover_text("Shows the top screen wider than the console's. Games still draw it at the console's shape, so only turn this on with a widescreen code for the game, which draws a wider scene to match.");
+                let wide = settings.top_shape != TopShape::Console;
+                ui.add_enabled(wide, egui::Checkbox::new(&mut settings.keep_2d, "Keep menus in proportion"))
+                    .on_hover_text("Menus, text and pictures on the wider top screen keep their shape instead of being stretched with it. Those across the whole screen still fill it, and the rest stay by the edge or in the middle where they were. The top screen's draws are worked out on the CPU for it.");
                 egui::ComboBox::from_label("3D").selected_text(settings.stereo.name()).show_ui(ui, |ui| {
                     for stereo in Stereo3d::ALL {
                         ui.selectable_value(&mut settings.stereo, stereo, stereo.name());

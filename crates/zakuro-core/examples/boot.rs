@@ -95,6 +95,11 @@ fn main() {
         println!("enhancement {} on", cheat.name);
     }
     let enhance_off_at: Option<u64> = std::env::var("ZAKURO_ENHANCE_OFF_AT").ok().and_then(|f| f.parse().ok());
+    // ZAKURO_TOP_WIDTH=426.67 keeps the top screen's 2D in proportion for a
+    // top screen shown that wide, 16:9, as the frontend's setting does
+    if let Some(width) = std::env::var("ZAKURO_TOP_WIDTH").ok().and_then(|w| w.parse().ok()) {
+        system.gpu.set_widescreen(Some(width));
+    }
 
     // ZAKURO_ROOM_HOST=port opens a room and joins it, ZAKURO_ROOM=host:port
     // joins one, under ZAKURO_NICK, for local wireless with another run

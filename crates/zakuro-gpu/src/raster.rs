@@ -976,6 +976,9 @@ pub struct Resources {
     /// the host GPU, when draws go to it rather than to the software path.
     #[cfg(feature = "vulkan")]
     pub(crate) hardware: Option<hardware::Hardware>,
+    /// how much narrower 2D on the top screen is drawn, the console's width
+    /// over the wider one it is shown at, see keep_2d_in_proportion.
+    pub(crate) widescreen: Option<f32>,
 }
 
 impl Resources {
@@ -2367,6 +2370,85 @@ fn assemble(topology: u32, count: usize) -> Vec<(usize, usize, usize)> {
     }
 }
 
+/// whether a viewport is the top screen's, 400 across as the console holds
+/// it, which is the buffer's height since the screens are mounted on their
+/// side, and 240 or twice that down for a title that draws it at double
+/// height and halves it on the way to the screen.
+fn on_top_screen(width: f32, height: f32) -> bool {
+    height == 400.0 && (width == 240.0 || width == 480.0)
+}
+
+/// a draw on a top screen shown wider than the console's, a widescreen code
+/// widening the title's 3D, with the across of each vertex brought back in
+/// proportion, or None for a draw to leave alone. what needs it is what
+/// faces the screen flat, every vertex at the same w, and the title made for
+/// the console's 400 pixels across:
+///
+/// - 2D, at a w of 1 as an orthographic projection leaves it, comes out
+///   stretched, and is brought in toward the middle. all of it alike, since
+///   what looks like one thing is often several draws, a word's letters from
+///   two pages of a font say, which have to stay next to each other. one
+///   spanning the screen, a background, still fills it.
+/// - a picture standing in the 3D at one depth, the w it has, is drawn in
+///   proportion by the wider camera already, but one sized to fill the
+///   console's view, a background, no longer reaches the edges and is
+///   stretched to.
+///
+/// squeeze is the console's width over the wider one, widest how far across
+/// the widest of the draw's triangles reaches, see widest_piece.
+fn keep_2d_in_proportion(shaded: &[Vertex], squeeze: f32, widest: f32) -> Option<Vec<Vertex>> {
+    const FLAT: f32 = 1e-4;
+    const EDGE: f32 = 0.99;
+    /// a quarter of the screen across.
+    const BIG_PIECE: f32 = 0.5;
+    let w = shaded.first()?.clip[3];
+    if w <= 0.0 || shaded.iter().any(|vertex| (vertex.clip[3] - w).abs() > FLAT * w.max(1.0)) {
+        return None;
+    }
+    // across the top screen is clip space's y, over w where the view's edges are
+    let (low, high) = shaded.iter().fold((f32::MAX, f32::MIN), |(low, high), vertex| {
+        let across = vertex.clip[1] / w;
+        (low.min(across), high.max(across))
+    });
+    let flat = (w - 1.0).abs() <= FLAT;
+    // where the console's view ended
+    let edge = if flat { EDGE } else { squeeze * EDGE };
+    // a background spans the view with a big piece or a few, where a line of
+    // text as long as the screen, scrolling past say, is many small ones, a
+    // letter each
+    let background = low <= -edge && high >= edge && widest >= BIG_PIECE;
+    let scale = match (flat, background) {
+        (true, false) => squeeze,
+        (false, true) => 1.0 / squeeze,
+        _ => return None,
+    };
+    Some(
+        shaded
+            .iter()
+            .map(|vertex| {
+                let mut vertex = *vertex;
+                vertex.clip[1] *= scale;
+                vertex
+            })
+            .collect(),
+    )
+}
+
+/// how far across the top screen the widest triangle of a draw reaches, its
+/// triangles given by the vertices in shaded they are made of.
+fn widest_piece(shaded: &[Vertex], triangles: impl Iterator<Item = [usize; 3]>) -> f32 {
+    let across = |vertex: &Vertex| vertex.clip[1] / vertex.clip[3];
+    triangles
+        .map(|corners| {
+            let (low, high) = corners.iter().fold((f32::MAX, f32::MIN), |(low, high), &i| {
+                let across = across(&shaded[i]);
+                (low.min(across), high.max(across))
+            });
+            high - low
+        })
+        .fold(0.0, f32::max)
+}
+
 /// assembles shaded vertices into triangles the way the primitive configuration
 /// says, and fills them with the current back-end state.
 /// the triangles drawn, none for arrays the GPU could not decode, which the
@@ -2493,10 +2575,14 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
     // wound clockwise and 2 counter-clockwise, as seen with y pointing up.
     let cull_mode = registers[REG_FACE_CULLING] & 0x3;
 
+    // a draw on the top screen, which is shown wider than the console's,
+    // keeps its 2D in proportion, which takes the vertices shaded here
+    let widescreen = resources.widescreen.filter(|_| on_top_screen(viewport_width, viewport_height));
+
     // the GPU runs the vertex shader itself, unless a geometry shader
     // comes after it
     #[cfg(feature = "vulkan")]
-    if let Some(hardware) = resources.hardware.as_mut() {
+    if let Some(hardware) = resources.hardware.as_mut().filter(|_| widescreen.is_none()) {
         let target = &state.target;
         let whole = target.buffer_width.is_multiple_of(8) && target.buffer_height.is_multiple_of(8);
         let unshaded = match vertices {
@@ -2540,6 +2626,17 @@ fn rasterize<M: GpuMemory>(registers: &[u32], memory: &mut M, resources: &mut Re
     // which of the vertices made each vertex of the draw is
     let at = |i: usize| order.map_or(i, |order| order[i]);
     let triangle_indices = assemble(topology, order.map_or(shaded.len(), <[usize]>::len));
+    let in_proportion;
+    let shaded = match widescreen.and_then(|squeeze| {
+        let widest = widest_piece(shaded, triangle_indices.iter().map(|&(a, b, c)| [at(a), at(b), at(c)]));
+        keep_2d_in_proportion(shaded, squeeze, widest)
+    }) {
+        Some(vertices) => {
+            in_proportion = vertices;
+            &in_proportion[..]
+        }
+        None => shaded,
+    };
 
     let triangle_count = triangle_indices.len();
     let mut clipped_away = 0u32;
@@ -5566,5 +5663,81 @@ mod tests {
         assert!(own == plain, "the title's own picture");
         assert!(between == halfway, "the picture in between");
         assert!(own != between);
+    }
+}
+
+#[cfg(test)]
+mod widescreen_tests {
+    use super::*;
+
+    const SQUEEZE: f32 = 400.0 / (240.0 * 16.0 / 9.0);
+
+    /// a quad across y from low to high, at w.
+    fn quad(low: f32, high: f32, w: f32) -> Vec<Vertex> {
+        [low, high, low, high]
+            .iter()
+            .map(|&y| Vertex { clip: [0.0, y * w, 0.0, w], color: [1.0; 4], texcoords: [[0.0; 2]; 3], quaternion: [0.0; 4], view: [0.0; 3] })
+            .collect()
+    }
+
+    /// keep_2d_in_proportion on vertices that come four to a quad, as quad
+    /// makes them, two triangles each.
+    fn keep(vertices: &[Vertex]) -> Option<Vec<Vertex>> {
+        let triangles = (0..vertices.len() / 4).flat_map(|q| [[q * 4, q * 4 + 1, q * 4 + 2], [q * 4 + 1, q * 4 + 2, q * 4 + 3]]);
+        keep_2d_in_proportion(vertices, SQUEEZE, widest_piece(vertices, triangles))
+    }
+
+    fn across(vertices: &[Vertex]) -> (f32, f32) {
+        vertices.iter().fold((f32::MAX, f32::MIN), |(low, high), vertex| (low.min(vertex.clip[1]), high.max(vertex.clip[1])))
+    }
+
+    #[test]
+    fn three_d_and_backgrounds_are_left_alone() {
+        // going away from the camera, nearer at one end than the other
+        let mut slanted = quad(-1.0, 1.0, 2.0);
+        slanted[1].clip[3] = 6.0;
+        slanted[1].clip[1] = 6.0;
+        assert!(keep(&slanted).is_none());
+        assert!(keep(&quad(-1.0, 1.0, 1.0)).is_none());
+    }
+
+    #[test]
+    fn the_middle_stays_centered_and_narrower() {
+        let (low, high) = across(&keep(&quad(-0.2, 0.4, 1.0)).unwrap());
+        assert!((low + 0.2 * SQUEEZE).abs() < 1e-6 && (high - 0.4 * SQUEEZE).abs() < 1e-6);
+    }
+
+    /// a word split over two draws, its capital from another page of the
+    /// font, stays together wherever it is.
+    #[test]
+    fn draws_next_to_each_other_stay_together() {
+        let capital = across(&keep(&quad(0.30, 0.34, 1.0)).unwrap());
+        let rest = across(&keep(&quad(0.34, 0.60, 1.0)).unwrap());
+        assert!((capital.1 - rest.0).abs() < 1e-6);
+    }
+
+    /// a line of text longer than the screen, scrolling past, is text and
+    /// not a background, so it moves with the rest of the line drawn apart.
+    #[test]
+    fn a_line_as_long_as_the_screen_is_not_a_background() {
+        let letters: Vec<Vertex> = (0..60).flat_map(|i| quad(-1.2 + i as f32 * 0.04, -1.17 + i as f32 * 0.04, 1.0)).collect();
+        let (low, high) = across(&keep(&letters).unwrap());
+        assert!((low + 1.2 * SQUEEZE).abs() < 1e-5 && (high - 1.19 * SQUEEZE).abs() < 1e-5);
+    }
+
+    /// a picture standing at one depth in the 3D, sized to fill the
+    /// console's view, fills the wider one, and a smaller one is left as the
+    /// wider camera draws it.
+    #[test]
+    fn pictures_in_the_3d_fill_the_screen_when_they_filled_the_console_s() {
+        let (low, high) = across(&keep(&quad(-SQUEEZE, SQUEEZE, 27.0)).unwrap());
+        assert!((low / 27.0 + 1.0).abs() < 1e-5 && (high / 27.0 - 1.0).abs() < 1e-5);
+        assert!(keep(&quad(-0.4, 0.3, 27.0)).is_none());
+    }
+
+    #[test]
+    fn only_the_top_screen_is_widened() {
+        assert!(on_top_screen(240.0, 400.0) && on_top_screen(480.0, 400.0));
+        assert!(!on_top_screen(240.0, 320.0) && !on_top_screen(256.0, 256.0));
     }
 }

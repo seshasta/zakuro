@@ -658,6 +658,14 @@ impl Gpu {
         None
     }
 
+    /// keeps the top screen's 2D in proportion when it is shown top_width
+    /// across rather than the console's 400, a widescreen code widening the
+    /// 3D, or stops with None. it takes the vertices of the top screen's
+    /// draws shaded on the CPU.
+    pub fn set_widescreen(&mut self, top_width: Option<f32>) {
+        self.resources.widescreen = top_width.filter(|width| *width > 400.0).map(|width| 400.0 / width);
+    }
+
     /// draws a picture in between each two of the title's own from now on,
     /// see interpolation, or stops, and says whether it does. the pictures
     /// in between are shown straight from the host's GPU, by a presenter

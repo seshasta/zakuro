@@ -475,6 +475,9 @@ pub struct Settings {
     /// how wide the top screen shows.
     #[serde(deserialize_with = "or_default")]
     pub top_shape: TopShape,
+    /// menus and pictures on a top screen shown wider than the console's
+    /// keep their proportions instead of being stretched with it.
+    pub keep_2d: bool,
     /// how the 3D shows.
     #[serde(deserialize_with = "or_default")]
     pub stereo: Stereo3d,
@@ -525,6 +528,7 @@ impl Default for Settings {
             filter: Filter::Smooth,
             integer_scale: false,
             top_shape: TopShape::Console,
+            keep_2d: false,
             stereo: Stereo3d::Off,
             depth_3d: 50,
             swap_eyes: false,

@@ -714,6 +714,7 @@ impl App {
         // in the room the player is in
         self.camera = None;
         self.apply_camera();
+        self.apply_widescreen();
         self.link_room();
         self.menus.menu_open = false;
         self.keyboard.release();
@@ -890,10 +891,21 @@ impl App {
             }
         }
         self.apply_camera();
+        self.apply_widescreen();
         self.keyboard.set_keys(self.settings.keys.clone());
         self.gamepads.set_buttons(self.settings.pad.clone());
         self.apply_volume();
         self.apply_layout();
+    }
+
+    /// has the running game keep the top screen's 2D in proportion when the
+    /// settings show it wider and ask for that.
+    fn apply_widescreen(&mut self) {
+        let shape = self.settings.top_shape;
+        let width = (self.settings.keep_2d && shape != settings::TopShape::Console).then(|| shape.width());
+        if let Some(game) = &mut self.game {
+            game.system.gpu.set_widescreen(width);
+        }
     }
 
     /// has the cameras see a picture dropped on the window, from now on.
