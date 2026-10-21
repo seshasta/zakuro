@@ -454,6 +454,10 @@ fn main() {
             };
             let addr = u32::from_str_radix(addr.trim_start_matches("0x"), 16).unwrap();
             let len: usize = len.parse().unwrap();
+            // ZAKURO_DUMP_SYNC=1 writes back what the host GPU drew there first
+            if std::env::var("ZAKURO_DUMP_SYNC").is_ok() {
+                system.sync_gpu(addr, len as u32);
+            }
             let mut bytes = vec![0u8; len];
             system.memory.read_bytes(addr, &mut bytes);
             let path = temp(&format!("zakuro-dump-0x{addr:08X}.bin"));

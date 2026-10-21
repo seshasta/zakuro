@@ -613,6 +613,7 @@ impl Gpu {
             None => raster::hardware::Hardware::with_device(std::sync::Arc::new(raster::hardware::own_device()?), false, kept)?,
         };
         let scale = hardware.set_scale(scale);
+        hardware.set_color_reads(title.is_some_and(reads_color_buffers));
         let shaded = if hardware.shades() { "" } else { ", vertices shaded on the CPU," };
         let direct = if hardware.direct() { ", shown straight from the GPU," } else { "" };
         let name = format!("{} at {scale}x{shaded}{direct}", hardware.name());
@@ -1236,6 +1237,18 @@ impl Gpu {
             _ => {}
         }
     }
+}
+
+/// whether a title reads back color buffers the GPU drew and acts on what
+/// it finds, so that the CPU's reads of them have to wait for the host's
+/// GPU. most titles that read them back go on with whatever memory holds,
+/// and waiting would stall them. Tomodachi Life reads each Mii's face
+/// texture back to build the mesh the face is drawn on, an old one leaves
+/// holes in the face.
+fn reads_color_buffers(title: u64) -> bool {
+    // Tomodachi Life (US)
+    const TITLES: [u64; 1] = [0x0004_0000_0008_C300];
+    TITLES.contains(&title)
 }
 
 /// pattern over bytes, from the start again each time it ends, the copies

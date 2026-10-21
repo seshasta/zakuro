@@ -1477,6 +1477,9 @@ pub struct Hardware {
     name: String,
     /// how many times the console's resolution surfaces are drawn at.
     scale: u32,
+    /// whether the CPU's reads of color buffers wait for what the GPU drew
+    /// there, as they do for depth buffers, see reads_color_buffers.
+    color_reads: bool,
     /// whether the GPU can blit the color format, which scaling needs.
     blits: bool,
     /// whether it can blit the depth format too. Intel's drivers for
@@ -1705,6 +1708,7 @@ impl Hardware {
                 batch: 0,
                 name,
                 scale: 1,
+                color_reads: false,
                 blits,
                 depth_blits,
                 // the queue has to count time for timestamps to mean anything
@@ -1770,6 +1774,13 @@ impl Hardware {
     /// how many times the console's resolution it draws at.
     pub fn scale(&self) -> u32 {
         self.scale
+    }
+
+    /// has the CPU's reads of the color buffers drawn from now on wait for
+    /// what the GPU drew there, for a title that reads them back and acts
+    /// on what it finds, see reads_color_buffers.
+    pub(crate) fn set_color_reads(&mut self, on: bool) {
+        self.color_reads = on;
     }
 
     /// draws at a multiple of the console's resolution, before anything is
@@ -3702,6 +3713,9 @@ impl Hardware {
             if color_mask != 0 {
                 self.surfaces[color].drew(rows);
                 self.surfaces[color].guard_writes(memory);
+                if self.color_reads {
+                    self.surfaces[color].guard(memory);
+                }
                 self.overdrawn(color, rows, depth);
             }
             if let Some(depth) = depth {
@@ -3957,9 +3971,11 @@ impl Hardware {
 
     /// the same over the depth buffers alone, for the CPU reading where a
     /// depth buffer was drawn. the color buffers there it reads as memory
-    /// holds them, see draw, even over memory a depth buffer had before.
+    /// holds them, see draw, even over memory a depth buffer had before,
+    /// but for a title whose color buffers it reads too, see color_reads.
     pub(crate) fn sync_depth<M: GpuMemory>(&mut self, memory: &mut M, addr: u32, len: u32) -> Result<(), String> {
-        self.sync_where(memory, addr, len, |surface| matches!(surface.kind, Kind::Depth(_)))
+        let colors = self.color_reads;
+        self.sync_where(memory, addr, len, |surface| colors || matches!(surface.kind, Kind::Depth(_)))
     }
 
     fn sync_where<M: GpuMemory>(
