@@ -234,11 +234,20 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         // IsRegistered(app id) -> true, so a title believes the applet it
         // asked about exists. any library applet is there only while the
         // title prepares or runs one, a title told one is there cancels it
-        // and waits for it to close, Yo-kai Watch 2 as it starts
+        // and waits for it to close, Yo-kai Watch 2 as it starts. the Mii
+        // selector is there only once prepared too: Tomodachi Life asks
+        // about it before preparing it, and told it is already there it
+        // skips the preparing, sends its request to an applet that never
+        // answers and waits forever.
         0x0009 => {
             let applet = buffer.get(&mut system.memory, 1);
             let apt = &system.services.apt;
-            let registered = applet != ANY_LIBRARY_APPLET || apt.library_applet.is_some() || apt.keyboard.is_some();
+            let registered = if super::mii_selector::APPLET_IDS.contains(&applet) {
+                apt.library_applet == Some(applet)
+            } else {
+                applet != ANY_LIBRARY_APPLET || apt.library_applet.is_some() || apt.keyboard.is_some()
+            };
+            log::debug!("apt: IsRegistered(0x{applet:03X}) -> {registered}");
             buffer.reply(&mut system.memory, 0x0009, &[registered as u32]);
             true
         }
@@ -253,6 +262,11 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             let signal = buffer.get(&mut system.memory, 3);
             let size = buffer.get(&mut system.memory, 4);
             let data = read_static(system, buffer, 7, size);
+            log::debug!(
+                "apt: SendParameter from 0x{:03X} to 0x{destination:03X}, signal {signal}, {size} bytes, while preparing {:X?}",
+                buffer.get(&mut system.memory, 1),
+                system.services.apt.library_applet
+            );
             if system.services.apt.library_applet == Some(destination) && signal == SIGNAL_REQUEST {
                 // the applet answers with a block to capture the screens into,
                 // as big as the capture info that came with the request says.
@@ -322,6 +336,7 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
         // applet counts as there from now on.
         0x0016 | 0x0018 => {
             system.services.apt.library_applet = Some(buffer.get(&mut system.memory, 1));
+            log::debug!("apt: command 0x{command:04X} prepares library applet {:X?}", system.services.apt.library_applet);
             buffer.reply(&mut system.memory, command, &[]);
             true
         }
