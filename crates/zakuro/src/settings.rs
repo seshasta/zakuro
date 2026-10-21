@@ -608,8 +608,12 @@ fn write(path: &Path, text: &str) -> std::io::Result<()> {
     std::fs::write(path, text)
 }
 
-/// the system's place for a program's settings.
+/// the system's place for a program's settings, or a folder made into a
+/// game of its own.
 fn path() -> Option<PathBuf> {
+    if let Some(app) = crate::app::get() {
+        return Some(app.dir.join("settings.toml"));
+    }
     let var = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty()).map(PathBuf::from);
     let dir = if cfg!(windows) {
         var("APPDATA")

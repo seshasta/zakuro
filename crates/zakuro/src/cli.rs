@@ -136,7 +136,8 @@ pub fn parse() -> Result<Options, String> {
     }
 
     options.rom = rom;
-    if options.headless.is_some() && options.rom.is_none() && !options.test_pattern {
+    // a folder made into a game of its own names the game itself
+    if options.headless.is_some() && options.rom.is_none() && !options.test_pattern && crate::app::get().is_none() {
         print!("{USAGE}");
         return Err("--headless needs a game".to_owned());
     }

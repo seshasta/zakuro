@@ -2,6 +2,7 @@
 //! a menu over it, and the loop that drives the emulated console one frame
 //! at a time.
 
+mod app;
 mod audio;
 mod camera;
 mod cli;
@@ -44,13 +45,28 @@ pub use zakuro_core::recompiled::Linked;
 pub fn run(linked: Option<Linked>) {
     report::init();
 
-    let options = match cli::parse() {
+    let mut options = match cli::parse() {
         Ok(options) => options,
         Err(message) => {
             eprintln!("zakuro: {message}");
             std::process::exit(2);
         }
     };
+    // a folder made into a game of its own starts that game, and keeps
+    // everything in the folder, unless the command line says otherwise
+    if let Some(app) = app::get() {
+        app::check(app);
+        // the system files next to the program are found wherever it was
+        // started from
+        if let Err(error) = std::env::set_current_dir(&app.dir) {
+            log::warn!("could not work from {}, {error}", app.dir.display());
+        }
+        options.rom.get_or_insert_with(|| app.game.to_string_lossy().into_owned());
+        options.data.get_or_insert_with(|| app.dir.to_string_lossy().into_owned());
+        if options.recompiled.is_none() && app.recompiled().is_dir() {
+            options.recompiled = Some(app.recompiled().to_string_lossy().into_owned());
+        }
+    }
     let mut settings = Settings::load();
     // the console's own number, made the first time and kept, which tells
     // it apart from others over local wireless
@@ -83,6 +99,7 @@ pub fn run(linked: Option<Linked>) {
         menus: {
             let mut menus = Menus::default();
             menus.slot = 1;
+            menus.app = app::get().is_some();
             menus
         },
         jobs: Vec::new(),
@@ -136,6 +153,23 @@ pub fn run(linked: Option<Linked>) {
     if let Err(error) = event_loop.run_app(&mut app) {
         eprintln!("zakuro: {error}");
     }
+}
+
+/// the window's title: Zakuro and how the game runs, or just the game's name
+/// for a folder made into a game of its own.
+fn window_title(game: Option<&Running>) -> String {
+    match (app::get(), game) {
+        (Some(app), game) => app.name.clone().or_else(|| Some(game?.name.clone())).unwrap_or_else(|| "Zakuro".to_owned()),
+        (None, Some(game)) => format!("Zakuro - {} - {}", game.name, game.system.status_line()),
+        (None, None) => "Zakuro".to_owned(),
+    }
+}
+
+/// the window's icon for a game, the one it shows on the console's menu.
+fn window_icon(system: &System) -> Option<winit::window::Icon> {
+    let smdh = library::Smdh::parse(system.title.as_ref()?.exefs_file("icon")?)?;
+    let side = library::ICON_SIZE as u32;
+    winit::window::Icon::from_rgba(smdh.icon, side, side).ok()
 }
 
 /// opens a folder in the system's file manager.
@@ -464,7 +498,7 @@ impl ApplicationHandler for App {
         }
 
         let size = self.window_size();
-        let attributes = Window::default_attributes().with_title("Zakuro").with_inner_size(size);
+        let attributes = Window::default_attributes().with_title(window_title(None)).with_inner_size(size);
         let renderer = self.options.renderer.unwrap_or(match self.settings.renderer {
             Renderer::Vulkan => RendererKind::Vulkan,
             Renderer::OpenGl => RendererKind::OpenGl,
@@ -545,6 +579,9 @@ impl ApplicationHandler for App {
                 self.tilt();
             }
             WindowEvent::RedrawRequested => self.step(event_loop),
+            // a picture dropped on the window is what the cameras see, a QR
+            // code's say, as the menu's "Show the camera a picture" does
+            WindowEvent::DroppedFile(path) => self.show_cameras(path),
             _ => {}
         }
     }
@@ -652,6 +689,9 @@ impl App {
             .or_else(|| Some(library::Smdh::parse(system.title.as_ref()?.exefs_file("icon")?)?.name).filter(|name| !name.is_empty()))
             .or_else(|| path.file_stem().map(|stem| stem.to_string_lossy().into_owned()))
             .unwrap_or_default();
+        if let Some(window) = &self.window {
+            window.set_window_icon(window_icon(&system));
+        }
         let mut game = Running::new(system, path.to_owned(), name);
         game.replay = replay;
         if let Some(record) = record {
@@ -854,6 +894,20 @@ impl App {
         self.gamepads.set_buttons(self.settings.pad.clone());
         self.apply_volume();
         self.apply_layout();
+    }
+
+    /// has the cameras see a picture dropped on the window, from now on.
+    fn show_cameras(&mut self, path: PathBuf) {
+        let extension = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        if !["png", "jpg", "jpeg", "webp", "bmp"].contains(&extension.as_str()) {
+            self.menus.toast = Some(("Only pictures can be dropped here, for the cameras to see".into(), Instant::now()));
+            return;
+        }
+        let name = path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        self.settings.camera = CameraSource::Picture;
+        self.settings.camera_picture = Some(path);
+        self.apply_settings();
+        self.menus.toast = Some((format!("The cameras now see {name}"), Instant::now()));
     }
 
     /// gives the running game's cameras what the settings say they see,
@@ -1234,11 +1288,7 @@ impl App {
                 );
             }
             if let Some(window) = &self.window {
-                let title = match &self.game {
-                    Some(game) => format!("Zakuro - {} - {}", game.name, game.system.status_line()),
-                    None => "Zakuro".to_owned(),
-                };
-                window.set_title(&title);
+                window.set_title(&window_title(self.game.as_ref()));
             }
             let underruns = self.audio.as_ref().map_or(0, |audio| audio.take_underruns());
             if underruns > 0 && playing {

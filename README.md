@@ -41,6 +41,15 @@ Games run faster with their code recompiled ahead of time by [3dsrecomp](https:/
 
 --recompiled points it at another library, and --interpreter runs everything in the interpreter.
 
+A folder can also be made into a game of its own. Put Zakuro in it, renamed after the game if you like, with an `app.toml` next to it:
+
+    game = "game/Your Game.3ds"
+    name = "Your Game"
+
+It then starts that game straight away, with no library, and keeps everything in the folder: `settings.toml`, saves in `user/`, the system files in `sysdata/`, and recompiled code in `recompiled/<title ID>.dll` (`.so` on Linux). The window takes the game's name and icon. Dropping a picture on the window, a QR code's say, has the cameras see it, in any mode.
+
+Mii QR codes are encrypted, and reading them needs keyslot 0x31 from your own console, as `slot0x31KeyN=` (or `slot0x31KeyX=` and `slot0x31KeyY=`) in `sysdata/aes_keys.txt`, the format Citra and Azahar use.
+
 You can use mods too. I kept the same folders Luma3DS and Azahar use, so if a mod works there, it should work here as it is. Each game has its own folder, `mods/<title ID>/`, inside Zakuro's data folder (`~/.local/share/zakuro/mods/` on Linux, `%APPDATA%\zakuro\mods\` on Windows), and the Mods button next to the game in the library opens it for you:
 
 - `romfs/` is for files that replace the game's own, or add new ones.

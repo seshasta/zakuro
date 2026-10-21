@@ -81,6 +81,9 @@ pub struct Menus {
     /// something to tell the user for a moment, over the game, and since
     /// when.
     pub toast: Option<(String, std::time::Instant)>,
+    /// a folder made into a game of its own, which has no library to go
+    /// back to.
+    pub app: bool,
     /// the slot states are saved to and loaded from, 1 to 9.
     pub slot: u8,
     /// the multiplayer window, and the password typed in it.
@@ -460,7 +463,7 @@ impl Menus {
                 if wide(ui, "Copy info for a report") {
                     actions.push(Action::CopyReport);
                 }
-                if wide(ui, "Back to the library") {
+                if !self.app && wide(ui, "Back to the library") {
                     actions.push(Action::Library);
                 }
                 if wide(ui, "Quit") {
