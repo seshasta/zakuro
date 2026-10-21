@@ -30,6 +30,10 @@ D2000000 00000000
 D3000000 08000000
 2020A748 0000003C
 D2000000 00000000
+# the two places that set the 3D camera's aspect to 5:3 set it to 16:9 instead
+Widescreen (16:9) | rev2 | seshasta | Set Top screen shape to 16:9 in the settings with it. Menus and text on the top screen are stretched a little.
+00183058 3FE38E39
+003309CC 3FE38E39
 
 = 00040000000E5C00 Shin Megami Tensei IV (USA)
 60 FPS | rev0 | lucky | The whole game runs twice as fast with it.

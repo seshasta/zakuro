@@ -64,7 +64,11 @@ pub fn cheats(program_id: u64, build: &str, on: &[String]) -> Vec<Cheat> {
     for_title(program_id, build)
         .into_iter()
         .map(|enhancement| {
-            let credit = format!("Code by {}, from the 60 FPS thread on GBAtemp.", enhancement.author);
+            let credit = if enhancement.name == "60 FPS" {
+                format!("Code by {}, from the 60 FPS thread on GBAtemp.", enhancement.author)
+            } else {
+                format!("Code by {}.", enhancement.author)
+            };
             let notes = [enhancement.note, credit].into_iter().filter(|line| !line.is_empty()).collect();
             let mut cheat = Cheat::new(&enhancement.name, enhancement.lines, notes);
             cheat.builtin = true;
@@ -83,7 +87,9 @@ mod tests {
     #[test]
     fn a_game_gets_the_enhancements_for_its_build() {
         let enhancements = for_title(0x0004_0000_0008_C300, "rev2");
-        assert_eq!(enhancements.len(), 1);
+        assert_eq!(enhancements.len(), 2);
+        assert_eq!(enhancements[1].name, "Widescreen (16:9)");
+        assert_eq!(enhancements[1].lines, ["00183058 3FE38E39", "003309CC 3FE38E39"]);
         let fps = &enhancements[0];
         assert_eq!((fps.name.as_str(), fps.author.as_str()), ("60 FPS", "Hazerou"));
         assert!(!fps.note.is_empty());
