@@ -50,6 +50,10 @@ pub struct AptState {
     pub capture_info: Vec<u8>,
     /// the software keyboard, while a title waits on it.
     pub keyboard: Option<super::keyboard::Pending>,
+    /// the user's dumped AES keys, read the first time Wrap or Unwrap needs
+    /// them. they are the user's, so a saved state never carries them.
+    #[serde(skip)]
+    pub keys: Option<crate::keys::AesKeys>,
 }
 
 /// the value the status word at the start of the shared font block takes once
@@ -438,10 +442,15 @@ pub fn handle(system: &mut System, buffer: &CommandBuffer, header: Header) -> bo
             buffer.set(&mut system.memory, 3, destination);
             true
         }
-        // ReceiveDeliverArg / SetWirelessRebootInfo and the rest of the
-        // hand-off machinery.
-        0x0035 | 0x0046 | 0x0047 => {
+        // ReceiveDeliverArg and the rest of the hand-off machinery.
+        0x0035 => {
             buffer.reply(&mut system.memory, command, &[0, 0]);
+            true
+        }
+        // Wrap / Unwrap(output size, input size, nonce offset, nonce size,
+        // input, output)
+        0x0046 | 0x0047 => {
+            wrap(system, buffer, command == 0x0046);
             true
         }
         // AppletUtility -> result plus one output word.
@@ -500,6 +509,112 @@ pub(crate) fn send_parameter(system: &mut System, parameter: Parameter) {
     }
 }
 
+/// the AES-CCM Wrap and Unwrap use: a 12-byte nonce and a 16-byte MAC.
+type WrapCcm = ccm::Ccm<aes::Aes128, ccm::consts::U16, ccm::consts::U12>;
+
+/// Wrap takes the nonce out of the input at the nonce offset and encrypts
+/// the rest with the APT wrap key, the output being the nonce, then what it
+/// encrypted, then the MAC. Unwrap undoes it, putting the nonce back at the
+/// offset. Mii QR codes are wrapped, so without the key a title finds no Mii
+/// in them. both fail when the user has not dumped the key, or when the MAC
+/// does not match.
+fn wrap(system: &mut System, buffer: &CommandBuffer, encrypt: bool) {
+    use ccm::aead::KeyInit;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // titles wrap hundreds of times while starting, one warning is enough.
+    static WARNED: AtomicBool = AtomicBool::new(false);
+
+    let command = if encrypt { 0x0046 } else { 0x0047 };
+    let output_size = buffer.get(&mut system.memory, 1) as usize;
+    let input_size = buffer.get(&mut system.memory, 2) as usize;
+    let nonce_offset = buffer.get(&mut system.memory, 3) as usize;
+    // a nonce shorter than 12 bytes is rounded down to whole words.
+    let mut nonce_size = (buffer.get(&mut system.memory, 4) as usize).min(12);
+    if nonce_size < 12 {
+        nonce_size &= !3;
+    }
+    let input_ptr = buffer.get(&mut system.memory, 6);
+    let output_ptr = buffer.get(&mut system.memory, 8);
+
+    let data_dir = system.config.data_dir.clone();
+    let keys = system.services.apt.keys.get_or_insert_with(|| crate::keys::AesKeys::load(data_dir.as_deref()));
+    let Some(key) = keys.normal(crate::keys::APT_WRAP) else {
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            log::warn!("apt: Wrap and Unwrap need keyslot 0x31, which is not in sysdata/aes_keys.txt; Mii QR codes cannot be read");
+        }
+        buffer.reply_error(&mut system.memory, command, 0xFFFF_FFFF);
+        return;
+    };
+    let cipher = WrapCcm::new(&key.into());
+
+    let mut input = vec![0; input_size];
+    system.memory.read_bytes(input_ptr, &mut input);
+    let mut nonce = [0u8; 12];
+    let output = if encrypt {
+        let nonce_offset = nonce_offset.min(input_size.saturating_sub(nonce_size));
+        nonce[..nonce_size].copy_from_slice(&input[nonce_offset..nonce_offset + nonce_size]);
+        let mut data = input[..nonce_offset].to_vec();
+        data.extend_from_slice(&input[nonce_offset + nonce_size..]);
+        let mac = ccm_encrypt(&cipher, &nonce, &mut data);
+        let mut output = nonce[..nonce_size].to_vec();
+        output.extend_from_slice(&data);
+        output.extend_from_slice(&mac);
+        output
+    } else {
+        let Some(data_size) = input_size.checked_sub(nonce_size + 16) else {
+            buffer.reply_error(&mut system.memory, command, 0xFFFF_FFFF);
+            return;
+        };
+        nonce[..nonce_size].copy_from_slice(&input[..nonce_size]);
+        let mut data = input[nonce_size..nonce_size + data_size].to_vec();
+        let mac = &input[nonce_size + data_size..];
+        if !ccm_decrypt(&cipher, &nonce, &mut data, mac) {
+            log::info!("apt: Unwrap of {input_size} bytes failed, the MAC does not match");
+            buffer.reply_error(&mut system.memory, command, 0xFFFF_FFFF);
+            return;
+        }
+        let nonce_offset = nonce_offset.min(data_size);
+        let mut output = data[..nonce_offset].to_vec();
+        output.extend_from_slice(&nonce[..nonce_size]);
+        output.extend_from_slice(&data[nonce_offset..]);
+        output
+    };
+    let size = output.len().min(output_size);
+    system.memory.write_bytes(output_ptr, &output[..size]);
+    buffer.reply(&mut system.memory, command, &[]);
+}
+
+/// encrypts data in place the way the 3DS's AES engine does CCM, giving the
+/// MAC. the engine works on whole blocks, so its MAC covers the data padded
+/// with zeros to a multiple of 16 bytes, where standard CCM covers only the
+/// data. the padding never reaches the output.
+fn ccm_encrypt(cipher: &WrapCcm, nonce: &[u8; 12], data: &mut Vec<u8>) -> [u8; 16] {
+    use ccm::aead::AeadInPlace;
+    let size = data.len();
+    data.resize(size.next_multiple_of(16), 0);
+    // CCM only fails on lengths far beyond anything a request carries.
+    let mac = cipher.encrypt_in_place_detached(nonce.into(), &[], data).expect("CCM length");
+    data.truncate(size);
+    mac.into()
+}
+
+/// decrypts data in place and checks it against the MAC as ccm_encrypt makes
+/// it, leaving data untouched when they do not match.
+fn ccm_decrypt(cipher: &WrapCcm, nonce: &[u8; 12], data: &mut [u8], mac: &[u8]) -> bool {
+    // CCM's keystream does not depend on the data, encrypting zeros gives it.
+    let mut plain = vec![0; data.len()];
+    ccm_encrypt(cipher, nonce, &mut plain);
+    for (p, c) in plain.iter_mut().zip(data.iter()) {
+        *p ^= c;
+    }
+    let mut check = plain.clone();
+    if ccm_encrypt(cipher, nonce, &mut check)[..] != *mac {
+        return false;
+    }
+    data.copy_from_slice(&plain);
+    true
+}
+
 /// the bytes a request carries in the static buffer whose descriptor sits at
 /// word index, at most size of them.
 fn read_static(system: &mut System, buffer: &CommandBuffer, index: u32, size: u32) -> Vec<u8> {
@@ -535,4 +650,48 @@ fn capture_block(system: &mut System, size: u32) -> Option<ObjectId> {
     system.kernel.objects.add_ref(object);
     system.services.apt.capture_block = Some((object, size));
     Some(object)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ccm::aead::{AeadInPlace, KeyInit};
+
+    fn cipher() -> WrapCcm {
+        WrapCcm::new(&[7u8; 16].into())
+    }
+
+    #[test]
+    fn wrapped_data_unwraps() {
+        let nonce = [1u8; 12];
+        let original: Vec<u8> = (0..88).collect();
+        let mut data = original.clone();
+        let mac = ccm_encrypt(&cipher(), &nonce, &mut data);
+        assert_eq!(data.len(), 88);
+        assert_ne!(data, original);
+        assert!(ccm_decrypt(&cipher(), &nonce, &mut data, &mac));
+        assert_eq!(data, original);
+    }
+
+    #[test]
+    fn a_wrong_mac_leaves_the_data_alone() {
+        let nonce = [1u8; 12];
+        let mut data: Vec<u8> = (0..88).collect();
+        let mut mac = ccm_encrypt(&cipher(), &nonce, &mut data);
+        mac[0] ^= 1;
+        let encrypted = data.clone();
+        assert!(!ccm_decrypt(&cipher(), &nonce, &mut data, &mac));
+        assert_eq!(data, encrypted);
+    }
+
+    #[test]
+    fn whole_blocks_are_standard_ccm() {
+        let nonce = [2u8; 12];
+        let mut ours: Vec<u8> = (0..96).collect();
+        let mut standard = ours.clone();
+        let mac = ccm_encrypt(&cipher(), &nonce, &mut ours);
+        let standard_mac = cipher().encrypt_in_place_detached(&nonce.into(), &[], &mut standard).unwrap();
+        assert_eq!(ours, standard);
+        assert_eq!(mac[..], standard_mac[..]);
+    }
 }

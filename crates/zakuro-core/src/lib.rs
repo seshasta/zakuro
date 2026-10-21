@@ -8,6 +8,7 @@ pub mod cro;
 pub mod download_play;
 pub mod hints;
 pub mod idle;
+pub mod keys;
 pub mod kernel;
 pub mod loader;
 pub mod memory;
