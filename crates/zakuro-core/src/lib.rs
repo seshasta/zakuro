@@ -858,6 +858,17 @@ impl System {
             .process_command_list(&mut guest, self.renderer.as_mut(), paddr, size);
     }
 
+    /// the console's clock now, in milliseconds since 1900.
+    pub fn clock(&self) -> u64 {
+        memory::config::clock_at(self.boot_clock, self.cpu.cycles)
+    }
+
+    /// sets the console's clock on by milliseconds, or back by a negative
+    /// count, from the next frame, as the console's settings would.
+    pub fn move_clock(&mut self, by: i64) {
+        self.boot_clock = self.boot_clock.saturating_add_signed(by);
+    }
+
     /// makes guest memory hold what the host GPU drew over a range, before
     /// something other than a draw reads or writes it.
     pub fn sync_gpu(&mut self, addr: u32, len: u32) {

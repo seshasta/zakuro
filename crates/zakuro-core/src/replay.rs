@@ -1,7 +1,9 @@
 //! a run's inputs written down frame by frame, with the clock it started
 //! at, so the run can be played back exactly. a line per change of input,
 //! the frame it starts at, the buttons, the circle pad, the touch, the tilt
-//! and the C-stick, which recordings from before them leave out.
+//! and the C-stick, which recordings from before them leave out, and a line
+//! per move of the clock, the frame it moves before, "clock" and how many
+//! milliseconds it moves on, or back when negative.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -46,6 +48,14 @@ impl Recorder {
         }
         self.frame += 1;
     }
+
+    /// the clock moves on by milliseconds, or back when negative, before the
+    /// next frame runs.
+    pub fn move_clock(&mut self, by: i64) {
+        if writeln!(self.out, "{} clock {by}", self.frame).and_then(|()| self.out.flush()).is_err() {
+            log::warn!("could not write to the input recording");
+        }
+    }
 }
 
 pub struct Replay {
@@ -53,6 +63,10 @@ pub struct Replay {
     changes: Vec<(u64, InputState)>,
     next: usize,
     current: InputState,
+    /// the clock's moves, the frame each is before and by how much, and the
+    /// first not made yet.
+    moves: Vec<(u64, i64)>,
+    next_move: usize,
 }
 
 impl Replay {
@@ -61,10 +75,15 @@ impl Replay {
         let mut lines = BufReader::new(File::open(path)?).lines();
         let first = lines.next().ok_or_else(|| bad("empty"))??;
         let clock = first.strip_prefix("clock ").and_then(|c| c.trim().parse().ok()).ok_or_else(|| bad("no clock"))?;
-        let mut changes = Vec::new();
+        let (mut changes, mut moves) = (Vec::new(), Vec::new());
         for line in lines {
             let line = line?;
             let fields: Vec<&str> = line.split_whitespace().collect();
+            if let [frame, "clock", by] = fields[..] {
+                let parsed = frame.parse().ok().zip(by.parse().ok());
+                moves.push(parsed.ok_or_else(|| bad(&line))?);
+                continue;
+            }
             let (head, rest) = fields.split_at(fields.len().min(6));
             let [frame, buttons, x, y, tx, ty] = head[..] else { return Err(bad(&line)) };
             let parse = || -> Option<(u64, InputState)> {
@@ -91,12 +110,26 @@ impl Replay {
             };
             changes.push(parse().ok_or_else(|| bad(&line))?);
         }
-        Ok(Replay { clock, changes, next: 0, current: InputState::default() })
+        Ok(Replay { clock, changes, next: 0, current: InputState::default(), moves, next_move: 0 })
     }
 
     /// the clock the recorded run started at.
     pub fn clock(&self) -> u64 {
         self.clock
+    }
+
+    /// how far the clock moves before a frame runs, in milliseconds, frames
+    /// asked for in order.
+    pub fn clock_moves(&mut self, frame: u64) -> i64 {
+        let mut by = 0;
+        while let Some(&(before, moved)) = self.moves.get(self.next_move) {
+            if before > frame {
+                break;
+            }
+            by += moved;
+            self.next_move += 1;
+        }
+        by
     }
 
     /// the input of a frame, frames asked for in order.
@@ -140,6 +173,24 @@ mod tests {
             let expected = if (3..6).contains(&frame) { pressed } else { InputState::default() };
             assert_eq!(replay.input(frame), expected);
         }
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// the clock moves in a playback before the frames it moved before.
+    #[test]
+    fn a_recording_moves_the_clock() {
+        let path = std::env::temp_dir().join(format!("zakuro-replay-clock-{}.txt", std::process::id()));
+        let mut recorder = Recorder::create(&path, 1000).unwrap();
+        recorder.record(InputState::default());
+        recorder.move_clock(3_600_000);
+        recorder.move_clock(-60_000);
+        recorder.record(InputState { buttons: PadState::A, ..InputState::default() });
+        recorder.record(InputState::default());
+        drop(recorder);
+        let mut replay = Replay::open(&path).unwrap();
+        assert_eq!((replay.clock_moves(0), replay.input(0).buttons), (0, PadState::empty()));
+        assert_eq!((replay.clock_moves(1), replay.input(1).buttons), (3_540_000, PadState::A));
+        assert_eq!((replay.clock_moves(2), replay.input(2).buttons), (0, PadState::empty()));
         let _ = std::fs::remove_file(path);
     }
 

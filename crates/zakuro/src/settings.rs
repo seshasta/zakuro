@@ -489,6 +489,10 @@ pub struct Settings {
     pub volume: f32,
     pub mute: bool,
     pub show_fps: bool,
+    /// how far the console's clock is ahead of the computer's, in seconds,
+    /// behind when negative, as the clock window set it. games see the
+    /// same day when they start again.
+    pub clock_offset: i64,
     /// a picture behind the library.
     pub background: Option<PathBuf>,
     /// how much of it shows, 0 to 1.
@@ -535,6 +539,7 @@ impl Default for Settings {
             volume: 1.0,
             mute: false,
             show_fps: false,
+            clock_offset: 0,
             background: None,
             background_opacity: 0.35,
             keys: Keys::default(),

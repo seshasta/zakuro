@@ -60,6 +60,19 @@ pub enum Action {
     ReloadCheats,
     /// show the cheats folder.
     CheatsFolder,
+    /// set the console's clock on, or back to the computer's.
+    Clock(ClockChange),
+}
+
+/// how the clock window sets the console's clock.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ClockChange {
+    /// on to when the hour given next starts.
+    To(u32),
+    /// on by seconds.
+    By(i64),
+    /// to the computer's time.
+    Computer,
 }
 
 #[derive(Default)]
@@ -68,6 +81,8 @@ pub struct Menus {
     pub menu_open: bool,
     /// the cheats window, and the cheat being written in it.
     pub cheats_open: bool,
+    /// the clock window.
+    pub clock_open: bool,
     cheat_name: String,
     cheat_code: String,
     pub settings_open: bool,
@@ -450,6 +465,13 @@ impl Menus {
                 if wide(ui, "Cheats") {
                     self.cheats_open = true;
                 }
+                if ui
+                    .add_sized([200.0, 28.0], egui::Button::new("Clock"))
+                    .on_hover_text("Set the console's clock on, to see what a game does at night or the next day.")
+                    .clicked()
+                {
+                    self.clock_open = true;
+                }
                 if wide(ui, "Multiplayer") {
                     self.multiplayer_open = true;
                 }
@@ -475,6 +497,45 @@ impl Menus {
                     progress(ui, job);
                 }
             });
+        actions
+    }
+
+    /// the clock window over a game, when open, with the time the console's
+    /// clock shows and how many seconds it is ahead of the computer's.
+    pub fn clock(&mut self, ctx: &egui::Context, now: &str, ahead: i64) -> Vec<Action> {
+        let mut actions = Vec::new();
+        let mut open = self.clock_open;
+        egui::Window::new("Clock").open(&mut open).resizable(false).show(ctx, |ui| {
+            ui.label(RichText::new(now).strong());
+            ui.label(RichText::new(clock_difference(ahead)).weak());
+            ui.add_space(6.0);
+            ui.label("Go on to the next");
+            ui.horizontal(|ui| {
+                for (name, hour) in [("Morning", 7), ("Noon", 12), ("Evening", 18), ("Night", 23)] {
+                    if ui.button(name).on_hover_text(format!("{hour}:00")).clicked() {
+                        actions.push(Action::Clock(ClockChange::To(hour)));
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                for (name, seconds) in [("+1 hour", 3600), ("+6 hours", 6 * 3600), ("+1 day", 24 * 3600)] {
+                    if ui.button(name).clicked() {
+                        actions.push(Action::Clock(ClockChange::By(seconds)));
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            if ui
+                .add_enabled(ahead != 0, egui::Button::new("Back to the computer's time"))
+                .on_hover_text("Games can take a clock that goes back as one set back on purpose.")
+                .clicked()
+            {
+                actions.push(Action::Clock(ClockChange::Computer));
+            }
+            ui.add_space(4.0);
+            ui.label(RichText::new("The game sees the new time within a moment, and still does the next time it starts.").weak().small());
+        });
+        self.clock_open = open;
         actions
     }
 
@@ -963,6 +1024,24 @@ fn progress(ui: &mut egui::Ui, job: &Job) {
 }
 
 /// a key as a person would call it.
+/// how far the console's clock is from the computer's, for the clock
+/// window, "2 days, 3 hours ahead of this computer".
+fn clock_difference(ahead: i64) -> String {
+    let minutes = (ahead.unsigned_abs() + 30) / 60;
+    if minutes == 0 {
+        return "The same as this computer's clock".to_owned();
+    }
+    let (days, hours, minutes) = (minutes / (24 * 60), minutes / 60 % 24, minutes % 60);
+    let part = |count: u64, one: &str| match count {
+        0 => None,
+        1 => Some(format!("1 {one}")),
+        _ => Some(format!("{count} {one}s")),
+    };
+    let parts: Vec<String> = [part(days, "day"), part(hours, "hour"), part(minutes, "minute")].into_iter().flatten().collect();
+    let side = if ahead > 0 { "ahead of" } else { "behind" };
+    format!("{} {side} this computer", parts.join(", "))
+}
+
 pub fn key_name(key: KeyCode) -> String {
     let name = format!("{key:?}");
     for prefix in ["Key", "Digit", "Arrow"] {
@@ -976,6 +1055,14 @@ pub fn key_name(key: KeyCode) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_clock_window_says_how_far_ahead_the_clock_is() {
+        assert_eq!(clock_difference(0), "The same as this computer's clock");
+        assert_eq!(clock_difference(3600), "1 hour ahead of this computer");
+        assert_eq!(clock_difference(2 * 86400 + 3 * 3600 + 5 * 60), "2 days, 3 hours, 5 minutes ahead of this computer");
+        assert_eq!(clock_difference(-90 * 60), "1 hour, 30 minutes behind this computer");
+    }
 
     #[test]
     fn a_background_fills_the_area_without_stretching() {

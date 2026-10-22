@@ -619,8 +619,16 @@ impl App {
             username: self.nickname(),
             console_id: self.settings.console_id,
             slider_3d: self.settings.slider_3d(),
+            // the computer's, unless the clock window set it on
+            clock: (self.settings.clock_offset != 0).then(|| self.console_clock()),
             ..Config::default()
         }
+    }
+
+    /// the computer's time with the console's clock as far ahead of it as the
+    /// clock window set it, in milliseconds since 1900.
+    fn console_clock(&self) -> u64 {
+        zakuro_core::memory::config::host_clock().saturating_add_signed(self.settings.clock_offset.saturating_mul(1000))
     }
 
     /// starts what the command line asks for, the test pattern or a game.
@@ -664,7 +672,7 @@ impl App {
         }
         // a recording starts the clock at a known time, for playing it back
         let record = std::env::var_os("ZAKURO_RECORD").map(PathBuf::from);
-        let clock = zakuro_core::memory::config::host_clock();
+        let clock = config.clock.unwrap_or_else(zakuro_core::memory::config::host_clock);
         if record.is_some() {
             config.clock = Some(clock);
         }
@@ -1198,6 +1206,7 @@ impl App {
                     }
                 }
             }
+            Action::Clock(change) => self.move_clock(change),
             Action::Quit => event_loop.exit(),
             Action::Settings => self.apply_settings(),
             Action::Keyboard(text, button) => {
@@ -1317,6 +1326,10 @@ impl App {
     /// runs one frame of the game.
     fn emulate(&mut self) {
         let Some(game) = &mut self.game else { return };
+        // the clock moves where a recording played back moved it
+        if let Some(by) = game.replay.as_mut().map(|replay| replay.clock_moves(game.frame)).filter(|&by| by != 0) {
+            game.system.move_clock(by);
+        }
         let input = match &mut game.replay {
             Some(replay) => replay.input(game.frame),
             None => self.gamepads.apply(self.keyboard.state()),
@@ -1529,6 +1542,29 @@ impl App {
     }
 
     /// writes the running game's cheats to their file.
+    /// sets the running game's console clock on, or back to the computer's,
+    /// writing the move down in a recording, and keeps how far ahead it is
+    /// for the next time a game starts.
+    fn move_clock(&mut self, change: menus::ClockChange) {
+        let Some(game) = &mut self.game else { return };
+        let now = game.system.clock();
+        let by = match change {
+            menus::ClockChange::To(hour) => zakuro_core::memory::config::until_hour(now, hour) as i64,
+            menus::ClockChange::By(seconds) => seconds * 1000,
+            menus::ClockChange::Computer => zakuro_core::memory::config::host_clock() as i64 - now as i64,
+        };
+        game.system.move_clock(by);
+        if let Some(recorder) = &mut game.recorder {
+            recorder.move_clock(by);
+        }
+        self.settings.clock_offset = match change {
+            menus::ClockChange::Computer => 0,
+            _ => self.settings.clock_offset.saturating_add(by / 1000),
+        };
+        self.settings.save();
+        log::info!("the console's clock moved {by} ms, to {}", zakuro_core::memory::config::clock_text(now.saturating_add_signed(by)));
+    }
+
     fn save_cheats(&mut self) {
         let (Some(path), Some(game)) = (self.cheats_path(), &self.game) else { return };
         if let Err(error) = zakuro_core::cheats::save(&path, &game.system.cheats) {
@@ -1560,6 +1596,9 @@ impl App {
                 port: self.room_server.as_ref().map(|server| server.port()),
             }
         });
+        let clock = self.game.as_ref().filter(|_| self.menus.clock_open).map(|game| {
+            (zakuro_core::memory::config::clock_text(game.system.clock()), self.settings.clock_offset)
+        });
         let cheats = self.game.as_ref().filter(|_| self.menus.cheats_open).map(|game| {
             game.system.cheats.iter().map(|cheat| (cheat.name.clone(), cheat.enabled, cheat.notes.join("\n"), cheat.builtin)).collect::<Vec<_>>()
         });
@@ -1578,6 +1617,9 @@ impl App {
             }
             if let Some(cheats) = &cheats {
                 actions.extend(menus.cheats(ui.ctx(), cheats));
+            }
+            if let Some((now, ahead)) = &clock {
+                actions.extend(menus.clock(ui.ctx(), now, *ahead));
             }
             if let Some(request) = &keyboard {
                 actions.extend(menus.keyboard(ui.ctx(), request));

@@ -90,11 +90,41 @@ pub fn host_clock() -> u64 {
     (unix as i64 + local) as u64 + EPOCH_OFFSET_SECONDS * 1000
 }
 
+/// the console's clock, in milliseconds since 1900, the clock at boot
+/// moved on by the emulated ticks since.
+pub fn clock_at(boot_clock: u64, tick: u64) -> u64 {
+    boot_clock + ticks_to_nanos(tick) / 1_000_000
+}
+
+/// a time of the console's clock as people read it, "Wed 21 Oct 2026, 20:31".
+pub fn clock_text(clock: u64) -> String {
+    match local_time(clock) {
+        Some(time) => time.format("%a %-d %b %Y, %H:%M").to_string(),
+        None => "an unreadable time".to_owned(),
+    }
+}
+
+/// how many milliseconds from a time of the console's clock until the hour
+/// given next starts, the next day's when it has started today.
+pub fn until_hour(clock: u64, hour: u32) -> u64 {
+    let Some(time) = local_time(clock) else { return 0 };
+    let Some(today) = time.date().and_hms_opt(hour.min(23), 0, 0) else { return 0 };
+    let next = if today > time { today } else { today + chrono::Duration::days(1) };
+    (next - time).num_milliseconds().max(0) as u64
+}
+
+/// a time of the console's clock, which keeps the local time, as a date and
+/// time with no time zone.
+fn local_time(clock: u64) -> Option<chrono::NaiveDateTime> {
+    let unix = clock as i64 - EPOCH_OFFSET_SECONDS as i64 * 1000;
+    Some(chrono::DateTime::from_timestamp_millis(unix)?.naive_utc())
+}
+
 /// refreshes the clock fields, the clock at boot moved on by the emulated
 /// ticks since. titles extrapolate from it with the tick, so a clock
 /// following the host's would run backwards whenever emulation ran ahead.
 pub fn update_datetime(page: &mut [u8], boot_clock: u64, tick: u64) {
-    let date_time = boot_clock + ticks_to_nanos(tick) / 1_000_000;
+    let date_time = clock_at(boot_clock, tick);
 
     for slot in [0x20usize, 0x40] {
         write_u64(page, slot, date_time);
@@ -154,6 +184,20 @@ mod tests {
         // 150 frames, about 2.5 s
         let elapsed = last - boot;
         assert!((2500..=2510).contains(&elapsed), "{elapsed} ms");
+    }
+
+    /// a time reads as the date and time it is, and the next start of an
+    /// hour is today's when it is still to come and tomorrow's when not.
+    #[test]
+    fn times_read_as_people_read_them() {
+        // 21 October 2026, 20:31:15, since 1900
+        let unix = chrono::NaiveDate::from_ymd_opt(2026, 10, 21).unwrap().and_hms_opt(20, 31, 15).unwrap().and_utc().timestamp_millis();
+        let clock = (unix + EPOCH_OFFSET_SECONDS as i64 * 1000) as u64;
+        assert_eq!(clock_text(clock), "Wed 21 Oct 2026, 20:31");
+        let minute = 60_000;
+        assert_eq!(until_hour(clock, 23), (2 * 60 + 28) * minute + 45_000);
+        assert_eq!(until_hour(clock, 7), (10 * 60 + 28) * minute + 45_000);
+        assert_eq!(clock_text(clock + until_hour(clock, 7)), "Thu 22 Oct 2026, 07:00");
     }
 
     /// the clock starts at the local time, which is what the console shows.

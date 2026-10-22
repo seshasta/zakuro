@@ -271,6 +271,11 @@ fn main() {
         }
         let mashing = mash_buttons && (script.is_empty() || mash_until.is_some_and(|until| frame < until));
         if let Some(replay) = &mut replay {
+            // the clock moves where the recording moved it
+            let by = replay.clock_moves(frame);
+            if by != 0 {
+                system.move_clock(by);
+            }
             system.set_input(replay.input(frame));
         } else if !script.is_empty() && !mashing {
             let held = || script.iter().filter(|(start, ..)| (*start..*start + 6).contains(&frame));
