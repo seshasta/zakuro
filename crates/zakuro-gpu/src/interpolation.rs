@@ -36,6 +36,23 @@ fn steps(before: f32, now: f32) -> bool {
     round(before) && round(now)
 }
 
+/// whether a uniform holds a cell of a sheet in both frames, its four
+/// corners from 0 to 1 on texels of it, finer than the halves and quarters
+/// a model's place in the world is at when it is round. a draw whose cell
+/// changed draws something else, a letter of a line of text that became
+/// another letter, or a slot of one that started showing one, and was
+/// likely taken for another draw, another pass of the letter or the same
+/// letter of another line. halfway between it would show part of each, or
+/// a letter halfway to another line, and the letters flicker. Tomodachi
+/// Life keeps its font's cells in 128ths, in the uniforms that also size
+/// its letters.
+fn cells(before: &Vec4, now: &Vec4) -> bool {
+    let corner = |value: f32| (0.0..=1.0).contains(&value) && (value * 1024.0).fract() == 0.0;
+    let fine = |value: f32| (value * 4.0).fract() != 0.0;
+    let values = || before.iter().chain(now);
+    values().all(|&value| corner(value)) && values().any(|&value| fine(value))
+}
+
 /// how many draws of the frame before drawn the same way a draw's match is
 /// looked for among, around its own place among them.
 const NEAREST: usize = 32;
@@ -177,9 +194,10 @@ impl Interpolation {
         let placed = |uniform: usize| (placing | shared) & (1 << uniform) != 0;
         let shared = |uniform: usize| shared & (1 << uniform) != 0;
         // what moves, the components that changed of the uniforms placing
-        // the vertices, but for steps of those the coordinates may read
+        // the vertices, but for steps of those the coordinates may read and
+        // for cells of sheets, which jump
         let moves = |uniform: usize, before: f32, now: f32| placed(uniform) && before != now && !(shared(uniform) && steps(before, now));
-        let changes = |uniform: usize, before: &Vec4, now: &Vec4| (0..4).any(|i| moves(uniform, before[i], now[i]));
+        let changes = |uniform: usize, before: &Vec4, now: &Vec4| !cells(before, now) && (0..4).any(|i| moves(uniform, before[i], now[i]));
         if !before.iter().zip(now.iter()).enumerate().any(|(uniform, (before, now))| changes(uniform, before, now)) {
             return None;
         }
@@ -195,6 +213,10 @@ impl Interpolation {
         let mut lerped = false;
         let uniforms = between.iter_mut().zip(before.iter()).zip(now.iter()).zip(moved_before.iter());
         for (uniform, (((out, before), now), moved_before)) in uniforms.enumerate() {
+            if placed(uniform) && before != now && cells(before, now) {
+                jumped = true;
+                break;
+            }
             let moving: [bool; 4] = std::array::from_fn(|i| moves(uniform, before[i], now[i]));
             let jumping: [bool; 4] = std::array::from_fn(|i| moving[i] && jumps(before[i], now[i], moved_before[i]));
             if jumping.contains(&true) {
@@ -435,6 +457,34 @@ mod tests {
         assert!((left[0][3] + 3.65).abs() < 1e-6);
         interpolation.give_back(left);
         assert_eq!(interpolation.frame_done(), Matches { draws: 2, matched: 2, moved: 2, jumped: 0, jumping: 0 });
+    }
+
+    /// a letter of a line of text whose cell in its font sheet changes is
+    /// drawn as it is, not halfway between two letters.
+    #[test]
+    fn letters_change_cells_at_once() {
+        let cell = |v0: f32, v1: f32| {
+            let mut unit = ShaderUnit::new();
+            unit.float_uniforms[0] = [4.0 / 128.0, v0, 124.0 / 128.0, v1];
+            unit
+        };
+        let mut interpolation = Interpolation::default();
+        // a slot showing no letter, then one
+        interpolation.draw(&registers(6), &cell(1.0 / 128.0, 1.0 / 128.0), None, true);
+        interpolation.frame_done();
+        assert!(interpolation.draw(&registers(6), &cell(59.0 / 128.0, 51.0 / 128.0), None, true).is_none(), "another cell");
+        assert_eq!(interpolation.frame_done().moved, 0);
+        // another letter, where the one before was, taken for it
+        let letter = |v0: f32, y: f32| {
+            let mut unit = cell(v0, v0 + 8.0 / 128.0);
+            unit.float_uniforms[1] = [0.0, 1.0, 0.0, y];
+            unit
+        };
+        interpolation.draw(&registers(6), &letter(16.0 / 128.0, 149.0), None, true);
+        interpolation.frame_done();
+        assert!(interpolation.draw(&registers(6), &letter(40.0 / 128.0, 118.0), None, true).is_none(), "not halfway");
+        let matches = interpolation.frame_done();
+        assert_eq!((matches.moved, matches.jumped + matches.jumping), (0, 1));
     }
 
     /// a draw whose uniforms jump, as a matrix does when the camera cuts or
