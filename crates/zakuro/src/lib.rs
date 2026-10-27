@@ -177,6 +177,24 @@ fn window_title(game: Option<&Running>) -> String {
     }
 }
 
+/// a window size the monitor has room for, with its title bar and the
+/// taskbar, the screens' proportions kept. at the scale chosen the screens
+/// side by side, the top one at 16:9, are wider than a laptop's screen.
+fn fit_monitor(size: winit::dpi::Size, monitor: Option<winit::monitor::MonitorHandle>) -> winit::dpi::Size {
+    let Some(monitor) = monitor else { return size };
+    let factor = monitor.scale_factor();
+    match fit(size.to_logical(factor), monitor.size().to_logical(factor)) {
+        Some(fitted) => fitted.into(),
+        None => size,
+    }
+}
+
+/// a size made smaller to fit in most of room, none when it fits as it is.
+fn fit(wanted: winit::dpi::LogicalSize<f64>, room: winit::dpi::LogicalSize<f64>) -> Option<winit::dpi::LogicalSize<f64>> {
+    let shrink = (room.width * 0.95 / wanted.width).min(room.height * 0.85 / wanted.height);
+    (shrink < 1.0).then(|| winit::dpi::LogicalSize::new((wanted.width * shrink).floor(), (wanted.height * shrink).floor()))
+}
+
 /// the window's icon for a game, the one it shows on the console's menu.
 fn window_icon(system: &System) -> Option<winit::window::Icon> {
     let smdh = library::Smdh::parse(system.title.as_ref()?.exefs_file("icon")?)?;
@@ -519,8 +537,17 @@ impl ApplicationHandler for App {
             return;
         }
 
-        let size = self.window_size();
-        let attributes = Window::default_attributes().with_title(window_title(None)).with_inner_size(size);
+        let monitor = event_loop.primary_monitor();
+        let size = fit_monitor(self.window_size(), monitor.clone());
+        let mut attributes = Window::default_attributes().with_title(window_title(None)).with_inner_size(size);
+        // in the middle of the monitor, where it has the room fit_monitor
+        // left it, rather than wherever the system cascades windows to
+        if let Some(monitor) = &monitor {
+            let (inner, room) = (size.to_physical::<i32>(monitor.scale_factor()), monitor.size().cast::<i32>());
+            let corner = monitor.position();
+            attributes = attributes
+                .with_position(winit::dpi::PhysicalPosition::new(corner.x + (room.width - inner.width) / 2, corner.y + (room.height - inner.height) / 3));
+        }
         let renderer = self.options.renderer.unwrap_or(match self.settings.renderer {
             Renderer::Vulkan => RendererKind::Vulkan,
             Renderer::OpenGl => RendererKind::OpenGl,
@@ -900,7 +927,7 @@ impl App {
             // the window's size through. a window maximized before comes
             // back maximized, resizing it would take it out of that
             if full && self.resize_after_full_screen && !self.maximized_before_full_screen {
-                let _ = window.request_inner_size(self.window_size());
+                let _ = window.request_inner_size(fit_monitor(self.window_size(), window.current_monitor()));
             }
         }
     }
@@ -1003,7 +1030,7 @@ impl App {
             match &self.window {
                 Some(window) if window.fullscreen().is_some() => self.resize_after_full_screen = true,
                 Some(window) if !window.is_maximized() => {
-                    let _ = window.request_inner_size(self.window_size());
+                    let _ = window.request_inner_size(fit_monitor(self.window_size(), window.current_monitor()));
                 }
                 _ => {}
             }
@@ -1888,6 +1915,19 @@ const _: RendererKind = RendererKind::Software;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_too_wide_for_the_monitor_shrinks_to_fit() {
+        use winit::dpi::LogicalSize;
+        // the screens side by side at twice their size, the top one 16:9, on
+        // a laptop's 1456 by 819
+        let wide = LogicalSize::new(1494.0, 480.0);
+        let fitted = fit(wide, LogicalSize::new(1456.0, 819.0)).expect("too wide");
+        assert!(fitted.width <= 1456.0 * 0.95 && fitted.height < 480.0);
+        assert!((fitted.width / fitted.height - wide.width / wide.height).abs() < 0.01, "the same shape");
+        // one that fits stays as it is
+        assert_eq!(fit(LogicalSize::new(800.0, 480.0), LogicalSize::new(1920.0, 1080.0)), None);
+    }
 
     /// a frame goes unshown only while the game runs behind with a
     /// presenter that waits for the display, a few in a row at most.

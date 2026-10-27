@@ -985,107 +985,112 @@ impl Menus {
                 );
                 ui.add_space(10.0);
             });
-            ui.vertical(|ui| {
-                ui.set_max_width(640.0);
-                for (part, state) in &setup.states {
+            // the column in the middle of a wide window
+            let margin = ((ui.available_width() - 640.0) / 2.0).max(0.0);
+            ui.horizontal_top(|ui| {
+                ui.add_space(margin);
+                ui.vertical(|ui| {
+                    ui.set_max_width(640.0);
+                    for (part, state) in &setup.states {
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                let (mark, color) = match state {
+                                    State::Ready(_) => ("✔", green),
+                                    State::Wrong(_) => ("✖", red),
+                                    State::Missing if part.required() => ("✖", red),
+                                    State::Missing => ("–", ui.visuals().weak_text_color()),
+                                };
+                                ui.label(RichText::new(mark).color(color).strong());
+                                ui.label(RichText::new(part.name()).strong());
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    let copying = setup.copying() == Some(*part);
+                                    if ui.add_enabled(!copying, egui::Button::new(if copying { "Copying…" } else { "Choose…" })).clicked() {
+                                        actions.push(Action::SetupChoose(*part));
+                                    }
+                                });
+                            });
+                            let text = match state {
+                                State::Ready(about) => RichText::new(format!("Ready: {about}")).color(green),
+                                State::Missing if part.required() => RichText::new("Missing").color(red),
+                                State::Missing => RichText::new("Not added").weak(),
+                                State::Wrong(why) => RichText::new(format!("This file won't work: {why}")).color(red),
+                            };
+                            ui.label(text);
+                            ui.label(RichText::new(part.purpose()).weak());
+                            if !state.ready() {
+                                egui::CollapsingHeader::new("How to get it").id_salt(part.name()).show(ui, |ui| {
+                                    ui.label(part.how());
+                                });
+                            }
+                        });
+                        ui.add_space(4.0);
+                    }
+                    // the code, recompiled for this computer
                     egui::Frame::group(ui.style()).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            let (mark, color) = match state {
-                                State::Ready(_) => ("✔", green),
-                                State::Wrong(_) => ("✖", red),
-                                State::Missing if part.required() => ("✖", red),
-                                State::Missing => ("–", ui.visuals().weak_text_color()),
-                            };
+                            let (mark, color) = if setup.recompiled { ("✔", green) } else { ("–", ui.visuals().weak_text_color()) };
                             ui.label(RichText::new(mark).color(color).strong());
-                            ui.label(RichText::new(part.name()).strong());
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let copying = setup.copying() == Some(*part);
-                                if ui.add_enabled(!copying, egui::Button::new(if copying { "Copying…" } else { "Choose…" })).clicked() {
-                                    actions.push(Action::SetupChoose(*part));
-                                }
-                            });
+                            ui.label(RichText::new("Recompiled code").strong());
                         });
-                        let text = match state {
-                            State::Ready(about) => RichText::new(format!("Ready: {about}")).color(green),
-                            State::Missing if part.required() => RichText::new("Missing").color(red),
-                            State::Missing => RichText::new("Not added").weak(),
-                            State::Wrong(why) => RichText::new(format!("This file won't work: {why}")).color(red),
-                        };
-                        ui.label(text);
-                        ui.label(RichText::new(part.purpose()).weak());
-                        if !state.ready() {
-                            egui::CollapsingHeader::new("How to get it").id_salt(part.name()).show(ui, |ui| {
-                                ui.label(part.how());
-                            });
+                        if setup.recompiled {
+                            ui.label(RichText::new("Ready: the game runs at full speed.").color(green));
+                        } else if setup.program_id.is_none() {
+                            ui.label(RichText::new("Once the game is in, its code can be recompiled for this computer.").weak());
+                        } else if let Some(job) = job.filter(|job| !job.stage().finished()) {
+                            progress(ui, job);
+                            ui.label(RichText::new("You can start the game meanwhile; it switches to the new code when this is done.").weak());
+                        } else if setup.recompiled_before {
+                            ui.label("This computer has the game's code recompiled from before.");
+                            if ui.button("Copy it into this folder").clicked() {
+                                actions.push(Action::SetupRecompile(false));
+                            }
+                        } else if setup.needs_compiler {
+                            let size = crate::zig::download_size().map_or_else(String::new, |size| format!(" ({} MB)", size / 1_000_000));
+                            ui.label("Recompiling needs a C compiler, and there isn't one on this computer. Zakuro can download Zig, which needs no installing.");
+                            if ui.button(format!("Download Zig{size} and recompile")).clicked() {
+                                actions.push(Action::SetupRecompile(true));
+                            }
+                        } else {
+                            ui.label(
+                                RichText::new("Recommended: turns the game's code into code for this computer, so it runs at full speed. It takes a while, once.")
+                                    .weak(),
+                            );
+                            if ui.button("Recompile").clicked() {
+                                actions.push(Action::SetupRecompile(false));
+                            }
                         }
                     });
-                    ui.add_space(4.0);
-                }
-                // the code, recompiled for this computer
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
+                    ui.add_space(8.0);
+                    match &setup.last {
+                        Some((Some(part), Ok(about))) => {
+                            ui.label(RichText::new(format!("{} added: {about}", part.name())).color(green));
+                        }
+                        Some((part, Err(why))) => {
+                            let what = part.map_or_else(String::new, |part| format!("{}: ", part.name()));
+                            ui.label(RichText::new(format!("{what}{why}")).color(red));
+                        }
+                        _ => {}
+                    }
+                    ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        let (mark, color) = if setup.recompiled { ("✔", green) } else { ("–", ui.visuals().weak_text_color()) };
-                        ui.label(RichText::new(mark).color(color).strong());
-                        ui.label(RichText::new("Recompiled code").strong());
+                        let ready = setup.ready();
+                        let start = ui.add_enabled(ready, egui::Button::new(RichText::new(format!("Start {name}")).strong()).min_size(Vec2::new(200.0, 32.0)));
+                        let start = match (ready, setup.recompiled) {
+                            (true, false) => start.on_hover_text("Without recompiled code it runs slower, recompile it when you can."),
+                            (false, _) => start.on_disabled_hover_text("Add the files marked ✖ first."),
+                            (true, true) => start,
+                        };
+                        if start.clicked() {
+                            actions.push(Action::SetupStart);
+                        }
+                        if ui.button("Open the folder").clicked() {
+                            actions.push(Action::SetupFolder);
+                        }
                     });
-                    if setup.recompiled {
-                        ui.label(RichText::new("Ready: the game runs at full speed.").color(green));
-                    } else if setup.program_id.is_none() {
-                        ui.label(RichText::new("Once the game is in, its code can be recompiled for this computer.").weak());
-                    } else if let Some(job) = job.filter(|job| !job.stage().finished()) {
-                        progress(ui, job);
-                        ui.label(RichText::new("You can start the game meanwhile; it switches to the new code when this is done.").weak());
-                    } else if setup.recompiled_before {
-                        ui.label("This computer has the game's code recompiled from before.");
-                        if ui.button("Copy it into this folder").clicked() {
-                            actions.push(Action::SetupRecompile(false));
-                        }
-                    } else if setup.needs_compiler {
-                        let size = crate::zig::download_size().map_or_else(String::new, |size| format!(" ({} MB)", size / 1_000_000));
-                        ui.label("Recompiling needs a C compiler, and there isn't one on this computer. Zakuro can download Zig, which needs no installing.");
-                        if ui.button(format!("Download Zig{size} and recompile")).clicked() {
-                            actions.push(Action::SetupRecompile(true));
-                        }
-                    } else {
-                        ui.label(
-                            RichText::new("Recommended: turns the game's code into code for this computer, so it runs at full speed. It takes a while, once.")
-                                .weak(),
-                        );
-                        if ui.button("Recompile").clicked() {
-                            actions.push(Action::SetupRecompile(false));
-                        }
-                    }
+                    ui.add_space(16.0);
                 });
-                ui.add_space(8.0);
-                match &setup.last {
-                    Some((Some(part), Ok(about))) => {
-                        ui.label(RichText::new(format!("{} added: {about}", part.name())).color(green));
-                    }
-                    Some((part, Err(why))) => {
-                        let what = part.map_or_else(String::new, |part| format!("{}: ", part.name()));
-                        ui.label(RichText::new(format!("{what}{why}")).color(red));
-                    }
-                    _ => {}
-                }
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    let ready = setup.ready();
-                    let start = ui.add_enabled(ready, egui::Button::new(RichText::new(format!("Start {name}")).strong()).min_size(Vec2::new(200.0, 32.0)));
-                    let start = match (ready, setup.recompiled) {
-                        (true, false) => start.on_hover_text("Without recompiled code it runs slower, recompile it when you can."),
-                        (false, _) => start.on_disabled_hover_text("Add the files marked ✖ first."),
-                        (true, true) => start,
-                    };
-                    if start.clicked() {
-                        actions.push(Action::SetupStart);
-                    }
-                    if ui.button("Open the folder").clicked() {
-                        actions.push(Action::SetupFolder);
-                    }
-                });
-                ui.add_space(16.0);
             });
         });
         actions
