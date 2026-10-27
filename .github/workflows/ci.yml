@@ -1,4 +1,5 @@
-# builds and tests Zakuro on Linux and Windows, and keeps the Windows program
+# builds and tests Zakuro on Linux, Windows and an Apple Silicon Mac, and
+# keeps the Windows and Mac programs
 name: CI
 
 on:
@@ -29,3 +30,27 @@ jobs:
         with:
           name: zakuro-windows
           path: target/release/zakuro.exe
+
+  # an Apple Silicon Mac. Vulkan there is MoltenVK, Vulkan made of Metal,
+  # from Homebrew. the tests that draw on the GPU pass without one, so the
+  # last test says whether the renderer found it, and why not
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: MoltenVK and the Vulkan loader
+        run: brew install molten-vk vulkan-loader vulkan-tools
+      - name: The GPUs Vulkan sees
+        continue-on-error: true
+        run: vulkaninfo --summary
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p zakuro
+      - run: cargo test --release -p zakuro -p zakuro-core -p zakuro-gpu
+      - name: Whether the renderer draws on the GPU
+        continue-on-error: true
+        run: cargo test --release -p zakuro-gpu --features vulkan -- --ignored --exact raster::hardware::tests::the_renderer_finds_a_gpu
+      - name: Keep the Mac program
+        uses: actions/upload-artifact@v7
+        with:
+          name: zakuro-macos-arm64
+          path: target/release/zakuro

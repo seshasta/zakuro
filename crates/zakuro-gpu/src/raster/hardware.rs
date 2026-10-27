@@ -5438,9 +5438,10 @@ fn scale_down_depth(data: &[u8], width: u32, height: u32, n: u32) -> Vec<u8> {
     out
 }
 
-/// whether the renderer can draw on a GPU, Vulkan 1.3, push descriptors,
-/// depth clamping and a D24S8 depth format.
-fn renders_on(instance: &ash::Instance, device: vk::PhysicalDevice) -> bool {
+/// what of Vulkan 1.3, push descriptors, depth clamping and a D24S8 depth
+/// format a GPU lacks, which the renderer needs all of. Apple's GPUs have no
+/// D24S8 under MoltenVK.
+fn lacks(instance: &ash::Instance, device: vk::PhysicalDevice) -> Vec<&'static str> {
     // SAFETY: queries on a GPU of the instance
     let (properties, features, depth, extensions) = unsafe {
         (
@@ -5451,10 +5452,79 @@ fn renders_on(instance: &ash::Instance, device: vk::PhysicalDevice) -> bool {
         )
     };
     let push = extensions.iter().any(|e| e.extension_name_as_c_str() == Ok(ash::khr::push_descriptor::NAME));
-    properties.api_version >= vk::API_VERSION_1_3
-        && features.depth_clamp == vk::TRUE
-        && depth.optimal_tiling_features.contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
-        && push
+    let mut lacks = Vec::new();
+    if properties.api_version < vk::API_VERSION_1_3 {
+        lacks.push("Vulkan 1.3");
+    }
+    if !push {
+        lacks.push("push descriptors");
+    }
+    if features.depth_clamp != vk::TRUE {
+        lacks.push("depth clamping");
+    }
+    if !depth.optimal_tiling_features.contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT) {
+        lacks.push("a D24S8 depth format");
+    }
+    lacks
+}
+
+/// whether the renderer can draw on a GPU, one that lacks nothing.
+fn renders_on(instance: &ash::Instance, device: vk::PhysicalDevice) -> bool {
+    lacks(instance, device).is_empty()
+}
+
+/// VK_KHR_portability_subset when a GPU has it, which a GPU with less than
+/// all of Vulkan, as MoltenVK's, has to be made a device with.
+pub(crate) fn portability_subset(instance: &ash::Instance, device: vk::PhysicalDevice) -> Option<*const std::ffi::c_char> {
+    // SAFETY: a query on a GPU of the instance
+    let extensions = unsafe { instance.enumerate_device_extension_properties(device) }.unwrap_or_default();
+    let name = ash::khr::portability_subset::NAME;
+    extensions.iter().any(|e| e.extension_name_as_c_str() == Ok(name)).then_some(name.as_ptr())
+}
+
+/// the Vulkan library. a Mac has none of its own: MoltenVK, Vulkan made of
+/// Metal, comes with the program, in an app's Frameworks or next to the
+/// program, or else is Homebrew's.
+pub(crate) fn load_vulkan() -> Result<ash::Entry, String> {
+    // SAFETY: loading the system's Vulkan library has no requirements
+    let loaded = unsafe { ash::Entry::load() };
+    #[cfg(target_os = "macos")]
+    let loaded = loaded.or_else(|error| {
+        let beside = std::env::current_exe().ok().and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
+        let folders = beside
+            .iter()
+            .flat_map(|folder| [folder.join("../Frameworks"), folder.clone()])
+            .chain(["/opt/homebrew/lib", "/usr/local/lib"].map(std::path::PathBuf::from));
+        for folder in folders {
+            for name in ["libvulkan.1.dylib", "libMoltenVK.dylib"] {
+                let path = folder.join(name);
+                // SAFETY: as above, a Vulkan library by another name
+                if let Some(entry) = path.exists().then(|| unsafe { ash::Entry::load_from(&path) }).and_then(Result::ok) {
+                    return Ok(entry);
+                }
+            }
+        }
+        Err(error)
+    });
+    loaded.map_err(|e| format!("no Vulkan loader, {e}"))
+}
+
+/// adds what an instance needs to list MoltenVK's GPUs to its extensions,
+/// and gives the flags it is made with. the Vulkan loader leaves out a
+/// driver with less than all of Vulkan unless asked for it. elsewhere this
+/// asks for nothing, so no other such driver turns up.
+pub(crate) fn portability(entry: &ash::Entry, extensions: &mut Vec<*const std::ffi::c_char>) -> vk::InstanceCreateFlags {
+    if !cfg!(target_os = "macos") {
+        return vk::InstanceCreateFlags::empty();
+    }
+    let name = ash::khr::portability_enumeration::NAME;
+    // SAFETY: a query of the library's own
+    let available = unsafe { entry.enumerate_instance_extension_properties(None) }.unwrap_or_default();
+    if !available.iter().any(|e| e.extension_name_as_c_str() == Ok(name)) {
+        return vk::InstanceCreateFlags::empty();
+    }
+    extensions.push(name.as_ptr());
+    vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR
 }
 
 /// whether the renderer can draw on a GPU through a family of its queues,
@@ -5480,6 +5550,7 @@ pub(crate) fn render_device(
     let queues = [vk::DeviceQueueCreateInfo::default().queue_family_index(family).queue_priorities(&priorities)];
     let mut extensions = vec![ash::khr::push_descriptor::NAME.as_ptr()];
     extensions.extend_from_slice(extra);
+    extensions.extend(portability_subset(instance, physical));
     // SAFETY: the physical device came from this instance
     let supported = unsafe { instance.get_physical_device_features(physical) };
     let logic_ops = supported.logic_op == vk::TRUE;
@@ -5564,13 +5635,14 @@ fn dynamic_state(instance: &ash::Instance, physical: vk::PhysicalDevice, logic_o
 
 /// a device of the renderer's own, on the GPU pick chooses.
 pub(crate) fn own_device() -> Result<SharedDevice, String> {
-    // SAFETY: loads the system's Vulkan library, which has no other
-    // requirements
-    let entry = unsafe { ash::Entry::load() }.map_err(|e| format!("no Vulkan loader, {e}"))?;
+    let entry = load_vulkan()?;
     let app = vk::ApplicationInfo::default().application_name(c"zakuro").api_version(vk::API_VERSION_1_3);
-    // SAFETY: a plain instance with no layers or extensions
-    let instance = unsafe { entry.create_instance(&vk::InstanceCreateInfo::default().application_info(&app), None) }
-        .map_err(vk_error("create an instance"))?;
+    let mut extensions = Vec::new();
+    let flags = portability(&entry, &mut extensions);
+    let info = vk::InstanceCreateInfo::default().application_info(&app).enabled_extension_names(&extensions).flags(flags);
+    // SAFETY: an instance with no layers, and on a Mac the extension to
+    // list MoltenVK's GPUs, which the library has
+    let instance = unsafe { entry.create_instance(&info, None) }.map_err(vk_error("create an instance"))?;
     let made = pick(&instance).and_then(|(physical, family)| render_device(&entry, &instance, physical, family, &[]));
     if made.is_err() {
         // SAFETY: nothing made from the instance is left
@@ -5585,12 +5657,17 @@ fn pick(instance: &ash::Instance) -> Result<(vk::PhysicalDevice, u32), String> {
     // SAFETY: queries on an instance we own
     let devices = unsafe { instance.enumerate_physical_devices() }.map_err(vk_error("list the GPUs"))?;
     let mut best: Option<(u32, vk::PhysicalDevice, u32)> = None;
+    // what each GPU passed over lacks, for the error
+    let mut passed = Vec::new();
     for device in devices {
         // SAFETY: as above
         let (properties, families) =
             unsafe { (instance.get_physical_device_properties(device), instance.get_physical_device_queue_family_properties(device)) };
         let Some(family) = families.iter().position(|f| f.queue_flags.contains(vk::QueueFlags::GRAPHICS)) else { continue };
-        if !renders_on(instance, device) {
+        let lacks = lacks(instance, device);
+        if !lacks.is_empty() {
+            let name = properties.device_name_as_c_str().map_or("a GPU".into(), std::ffi::CStr::to_string_lossy);
+            passed.push(format!("{name} has no {}", lacks.join(", no ")));
             continue;
         }
         let rank = match properties.device_type {
@@ -5602,13 +5679,28 @@ fn pick(instance: &ash::Instance) -> Result<(vk::PhysicalDevice, u32), String> {
             best = Some((rank, device, family as u32));
         }
     }
-    best.map(|(_, device, family)| (device, family))
-        .ok_or_else(|| "no GPU with Vulkan 1.3, push descriptors and a D24S8 depth format".to_owned())
+    best.map(|(_, device, family)| (device, family)).ok_or_else(|| {
+        let wanted = "no GPU with Vulkan 1.3, push descriptors, depth clamping and a D24S8 depth format";
+        if passed.is_empty() {
+            wanted.to_owned()
+        } else {
+            format!("{wanted}, {}", passed.join("; "))
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// the renderer finds a GPU to draw on, or says why not. the tests that
+    /// draw pass without one, so CI runs this where it wants to know,
+    /// cargo test -- --ignored the_renderer_finds_a_gpu.
+    #[test]
+    #[ignore]
+    fn the_renderer_finds_a_gpu() {
+        own_device().unwrap();
+    }
 
     /// a block gathered with the words of the last one staged is read from
     /// where that went, any other is staged anew, and nothing is read from

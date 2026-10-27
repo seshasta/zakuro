@@ -9,7 +9,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use super::vulkan_overlay::OverlayPainter;
 use super::{place, GpuScreen, Overlay, PresentError, Presenter, ScreenFilter, ScreenImage, ScreenLayout, Shown, Stereo, StereoMode, Viewport};
-use crate::raster::hardware::{can_render, render_device};
+use crate::raster::hardware::{can_render, load_vulkan, portability, portability_subset, render_device};
 use crate::SharedDevice;
 
 const VERTEX_SPIRV: &[u8] = include_bytes!("../../shaders/present.vert.spv");
@@ -134,10 +134,7 @@ impl VulkanPresenter {
         window: &(impl HasDisplayHandle + HasWindowHandle),
         size: (u32, u32),
     ) -> Result<VulkanPresenter, PresentError> {
-        // SAFETY: the loader reads the system's Vulkan library, which is the
-        // documented way to start.
-        let entry = unsafe { ash::Entry::load() }
-            .map_err(|e| fail(format!("no Vulkan loader: {e}")))?;
+        let entry = load_vulkan().map_err(fail)?;
 
         let display = window
             .display_handle()
@@ -153,13 +150,15 @@ impl VulkanPresenter {
             .engine_name(c"Zakuro")
             .api_version(vk::API_VERSION_1_3);
 
-        let extensions = ash_window::enumerate_required_extensions(display.as_raw())
+        let mut extensions = ash_window::enumerate_required_extensions(display.as_raw())
             .map_err(vk_fail("querying surface extensions"))?
             .to_vec();
+        let flags = portability(&entry, &mut extensions);
 
         let instance_info = vk::InstanceCreateInfo::default()
             .application_info(&application)
-            .enabled_extension_names(&extensions);
+            .enabled_extension_names(&extensions)
+            .flags(flags);
         let instance = unsafe { entry.create_instance(&instance_info, None) }
             .map_err(vk_fail("creating the instance"))?;
 
@@ -207,9 +206,11 @@ impl VulkanPresenter {
                 let queue_info = [vk::DeviceQueueCreateInfo::default()
                     .queue_family_index(queue_family)
                     .queue_priorities(&priorities)];
+                let mut extensions = swapchain_extension.to_vec();
+                extensions.extend(portability_subset(&instance, physical_device));
                 let device_info = vk::DeviceCreateInfo::default()
                     .queue_create_infos(&queue_info)
-                    .enabled_extension_names(&swapchain_extension);
+                    .enabled_extension_names(&extensions);
                 unsafe { instance.create_device(physical_device, &device_info, None) }
                     .map_err(vk_fail("creating the device"))?
             }
