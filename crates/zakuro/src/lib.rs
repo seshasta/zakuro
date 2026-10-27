@@ -15,6 +15,7 @@ mod present;
 mod recompile;
 mod report;
 mod settings;
+mod setup;
 mod zig;
 
 use std::path::{Path, PathBuf};
@@ -53,18 +54,28 @@ pub fn run(linked: Option<Linked>) {
         }
     };
     // a folder made into a game of its own starts that game, and keeps
-    // everything in the folder, unless the command line says otherwise
+    // everything in the folder, unless the command line says otherwise.
+    // without what the game needs, or its code recompiled, it opens on
+    // setup first
+    let mut first_run = None;
     if let Some(app) = app::get() {
-        app::check(app);
         // the system files next to the program are found wherever it was
         // started from
         if let Err(error) = std::env::set_current_dir(&app.dir) {
             log::warn!("could not work from {}, {error}", app.dir.display());
         }
-        options.rom.get_or_insert_with(|| app.game.to_string_lossy().into_owned());
         options.data.get_or_insert_with(|| app.dir.to_string_lossy().into_owned());
         if options.recompiled.is_none() && app.recompiled().is_dir() {
             options.recompiled = Some(app.recompiled().to_string_lossy().into_owned());
+        }
+        if options.rom.is_none() {
+            let found = setup::Setup::new(app);
+            match (found.ready() && found.recompiled, options.headless.is_some()) {
+                (true, _) => options.rom = Some(app.game.to_string_lossy().into_owned()),
+                (false, false) => first_run = Some(found),
+                (false, true) if found.ready() => options.rom = Some(app.game.to_string_lossy().into_owned()),
+                (false, true) => app::fail("This folder doesn't have all the game needs yet. Start it without --headless to set it up."),
+            }
         }
     }
     let mut settings = Settings::load();
@@ -96,6 +107,7 @@ pub fn run(linked: Option<Linked>) {
         library: Library::new(data_dir.clone()),
         data_dir,
         game: None,
+        setup: first_run,
         menus: {
             let mut menus = Menus::default();
             menus.slot = 1;
@@ -327,6 +339,13 @@ fn run_headless(system: &mut System, frames: u64) {
     }
 }
 
+/// why a recompile can't start yet: a compiler to download, which the
+/// player is asked about, or none to be had.
+enum NoCompiler {
+    Offer,
+    Message(String),
+}
+
 /// a game being played.
 struct Running {
     system: System,
@@ -378,6 +397,9 @@ struct App {
     data_dir: Option<PathBuf>,
     game: Option<Running>,
     library: Library,
+    /// the first run of a folder made into a game of its own, until the
+    /// game starts, see setup.
+    setup: Option<setup::Setup>,
     menus: Menus,
     jobs: Vec<Job>,
     gui: Option<Gui>,
@@ -581,7 +603,12 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => self.step(event_loop),
             // a picture dropped on the window is what the cameras see, a QR
             // code's say, as the menu's "Show the camera a picture" does
-            WindowEvent::DroppedFile(path) => self.show_cameras(path),
+            // a file dropped on setup is one it asks for, on a game a
+            // picture for the cameras
+            WindowEvent::DroppedFile(path) => match (&mut self.setup, app::get()) {
+                (Some(setup), Some(app)) if self.game.is_none() => setup.dropped(app, path),
+                _ => self.show_cameras(path),
+            },
             _ => {}
         }
     }
@@ -1005,31 +1032,133 @@ impl App {
         if self.jobs.iter().any(|job| job.program_id == game.program_id) {
             return;
         }
-        let tools = zig::tools_dir(self.data_dir.as_deref());
-        let toolchain = match recomp3ds::compile::check(None) {
-            Ok(compiler) => Toolchain::Ready(compiler),
-            Err(error) => match tools.as_deref().and_then(zig::installed) {
-                Some(compiler) => Toolchain::Ready(compiler),
-                None => match tools {
-                    Some(tools) if download && zig::download_size().is_some() && zig::can_download() => Toolchain::Download(tools),
-                    Some(_) if zig::download_size().is_some() && zig::can_download() => {
-                        self.menus.compiler_offer = Some(index);
-                        return;
-                    }
-                    Some(_) if zig::download_size().is_some() => {
-                        self.menus.message =
-                            Some(format!("Recompiling needs a C compiler, gcc or clang, or curl or wget for Zakuro to download one: {error}."));
-                        return;
-                    }
-                    _ => {
-                        self.menus.message = Some(format!("Recompiling needs a C compiler: {error}."));
-                        return;
-                    }
-                },
-            },
+        let toolchain = match self.toolchain(download) {
+            Ok(toolchain) => toolchain,
+            Err(NoCompiler::Offer) => {
+                self.menus.compiler_offer = Some(index);
+                return;
+            }
+            Err(NoCompiler::Message(message)) => {
+                self.menus.message = Some(message);
+                return;
+            }
         };
         let update = game.update.as_ref().map(|update| update.path.as_path());
         self.jobs.push(Job::start(&game.path, update, game.program_id, &game.name, self.data_dir.as_deref(), toolchain));
+    }
+
+    /// recompiles the game of a folder made into a game of its own, from
+    /// setup, as recompile does a library's game.
+    fn recompile_app(&mut self, download: bool) {
+        let Some(app) = app::get() else { return };
+        let Some(program_id) = self.setup.as_ref().and_then(|setup| setup.program_id) else { return };
+        let name = app.name.clone().unwrap_or_else(|| "the game".to_owned());
+        // the code recompiled before on this computer is copied in rather
+        // than made again
+        if self.setup.as_ref().is_some_and(|setup| setup.recompiled_before) && !download {
+            self.keep_recompiled(program_id, &name);
+            return;
+        }
+        self.jobs.retain(|job| job.program_id != program_id || !job.stage().finished());
+        if self.jobs.iter().any(|job| job.program_id == program_id) {
+            return;
+        }
+        let toolchain = match self.toolchain(download) {
+            Ok(toolchain) => toolchain,
+            Err(NoCompiler::Offer) => {
+                if let Some(setup) = &mut self.setup {
+                    setup.needs_compiler = true;
+                }
+                return;
+            }
+            Err(NoCompiler::Message(message)) => {
+                self.menus.message = Some(message);
+                return;
+            }
+        };
+        if let Some(setup) = &mut self.setup {
+            setup.needs_compiler = false;
+        }
+        self.jobs.push(Job::start(&app.game, None, program_id, &name, self.data_dir.as_deref(), toolchain));
+    }
+
+    /// the computer's C compiler, or the Zig Zakuro downloaded, or else, when
+    /// download is set, Zig to download first.
+    fn toolchain(&self, download: bool) -> Result<Toolchain, NoCompiler> {
+        let tools = zig::tools_dir(self.data_dir.as_deref());
+        match recomp3ds::compile::check(None) {
+            Ok(compiler) => Ok(Toolchain::Ready(compiler)),
+            Err(error) => match tools.as_deref().and_then(zig::installed) {
+                Some(compiler) => Ok(Toolchain::Ready(compiler)),
+                None => match tools {
+                    Some(tools) if download && zig::download_size().is_some() && zig::can_download() => Ok(Toolchain::Download(tools)),
+                    Some(_) if zig::download_size().is_some() && zig::can_download() => Err(NoCompiler::Offer),
+                    Some(_) if zig::download_size().is_some() => Err(NoCompiler::Message(format!(
+                        "Recompiling needs a C compiler, gcc or clang, or curl or wget for Zakuro to download one: {error}."
+                    ))),
+                    _ => Err(NoCompiler::Message(format!("Recompiling needs a C compiler: {error}."))),
+                },
+            },
+        }
+    }
+
+    /// picks the file for a part of setup and copies it in.
+    fn setup_choose(&mut self, part: setup::Part) {
+        let mut dialog = self.file_dialog().set_title(format!("Choose: {}", part.name()));
+        if part == setup::Part::Game {
+            dialog = dialog.add_filter("3DS games", &["3ds", "cci", "cxi", "cia"]).add_filter("All files", &["*"]);
+        }
+        let picked = dialog.pick_file();
+        log::info!("setup: {} chosen as {picked:?}", part.name());
+        if let (Some(app), Some(setup), Some(path)) = (app::get(), &mut self.setup, picked) {
+            setup.choose(app, part, path);
+        }
+    }
+
+    /// a dialog for picking files over the window, which it keeps in front
+    /// of it, one on its own can open behind it.
+    fn file_dialog(&self) -> rfd::FileDialog {
+        let dialog = rfd::FileDialog::new();
+        match &self.window {
+            Some(window) => dialog.set_parent(window),
+            None => dialog,
+        }
+    }
+
+    /// starts the game once setup has what it needs.
+    fn setup_start(&mut self) {
+        let Some(app) = app::get() else { return };
+        if !self.setup.as_ref().is_some_and(setup::Setup::ready) {
+            return;
+        }
+        if self.options.recompiled.is_none() && app.recompiled().is_dir() {
+            self.options.recompiled = Some(app.recompiled().to_string_lossy().into_owned());
+        }
+        self.options.rom = Some(app.game.to_string_lossy().into_owned());
+        self.setup = None;
+        if let Err(error) = self.play(&app.game) {
+            self.menus.message = Some(format!("The game can't start: {error}"));
+            self.setup = Some(setup::Setup::new(app));
+        }
+    }
+
+    /// copies a game's code, recompiled, into the folder of a folder made
+    /// into a game of its own, which keeps everything the game needs.
+    fn keep_recompiled(&mut self, program_id: u64, name: &str) {
+        let Some(app) = app::get() else { return };
+        let Some(from) = zakuro_core::recompiled::installed(program_id) else { return };
+        let to = app.recompiled().join(setup::library_name(program_id));
+        match std::fs::create_dir_all(app.recompiled()).and_then(|()| std::fs::copy(&from, &to)) {
+            Ok(_) => {
+                self.options.recompiled = Some(app.recompiled().to_string_lossy().into_owned());
+                if let Some(setup) = &mut self.setup {
+                    setup.refresh(app);
+                }
+            }
+            Err(error) => {
+                self.menus.message = Some(format!("{name} is recompiled, but its code couldn't be copied into {}: {error}", app.recompiled().display()))
+            }
+        }
     }
 
     /// tells about recompiles as they finish.
@@ -1045,6 +1174,7 @@ impl App {
             match stage {
                 Stage::Done => {
                     self.library.refresh_recompiled();
+                    self.keep_recompiled(program_id, &name);
                     let playing = self.game.as_ref().is_some_and(|game| game.system.title.as_ref().is_some_and(|title| title.program_id() == program_id));
                     let installed = zakuro_core::recompiled::installed(program_id);
                     if let (true, Some(game), Some(path)) = (playing, self.game.as_mut(), installed) {
@@ -1091,7 +1221,7 @@ impl App {
                 }
             }
             Action::ChooseFolder => {
-                if let Some(folder) = rfd::FileDialog::new().set_title("Where your games are").pick_folder() {
+                if let Some(folder) = self.file_dialog().set_title("Where your games are").pick_folder() {
                     self.settings.games = Some(folder.clone());
                     self.settings.save();
                     self.library.scan(&folder);
@@ -1113,7 +1243,8 @@ impl App {
                 self.dlp_own = None;
             }
             Action::ChooseCameraPicture => {
-                let picked = rfd::FileDialog::new()
+                let picked = self
+                    .file_dialog()
                     .set_title("A picture for the cameras")
                     .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "bmp"])
                     .pick_file();
@@ -1124,7 +1255,8 @@ impl App {
                 }
             }
             Action::ChooseBackground => {
-                let picked = rfd::FileDialog::new()
+                let picked = self
+                    .file_dialog()
                     .set_title("A picture for the library")
                     .add_filter("Pictures", &["png", "jpg", "jpeg", "webp", "bmp"])
                     .pick_file();
@@ -1207,6 +1339,14 @@ impl App {
                 }
             }
             Action::Clock(change) => self.move_clock(change),
+            Action::SetupChoose(part) => self.setup_choose(part),
+            Action::SetupRecompile(download) => self.recompile_app(download),
+            Action::SetupFolder => {
+                if let Some(app) = app::get() {
+                    show_folder(&app.dir);
+                }
+            }
+            Action::SetupStart => self.setup_start(),
             Action::Quit => event_loop.exit(),
             Action::Settings => self.apply_settings(),
             Action::Keyboard(text, button) => {
@@ -1602,6 +1742,10 @@ impl App {
         let cheats = self.game.as_ref().filter(|_| self.menus.cheats_open).map(|game| {
             game.system.cheats.iter().map(|cheat| (cheat.name.clone(), cheat.enabled, cheat.notes.join("\n"), cheat.builtin)).collect::<Vec<_>>()
         });
+        if let (Some(setup), Some(app)) = (&mut self.setup, app::get()) {
+            setup.poll(app);
+        }
+        let first_run = self.setup.as_ref().zip(app::get());
         let (menus, library, settings, jobs) = (&mut self.menus, &self.library, &mut self.settings, &self.jobs);
         let mut actions = Vec::new();
         let overlay = gui.frame(window, |ui| {
@@ -1609,7 +1753,13 @@ impl App {
                 Some((name, fps, recompiled)) => {
                     actions.extend(menus.game(ui, name, show_fps.then_some(*fps), *recompiled, fast, jobs, saved.as_deref()))
                 }
-                None => actions.extend(menus.library(ui, library, settings, jobs)),
+                None => match first_run {
+                    Some((setup, app)) => {
+                        let job = setup.program_id.and_then(|id| jobs.iter().rev().find(|job| job.program_id == id));
+                        actions.extend(menus.setup(ui, setup, app.name.as_deref().unwrap_or("the game"), job))
+                    }
+                    None => actions.extend(menus.library(ui, library, settings, jobs)),
+                },
             }
             actions.extend(menus.settings(ui.ctx(), settings));
             if menus.multiplayer_open {

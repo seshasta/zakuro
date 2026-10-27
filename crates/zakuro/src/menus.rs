@@ -10,6 +10,7 @@ use zakuro_core::services::keyboard::Request;
 
 use crate::library::{Library, ICON_SIZE};
 use crate::recompile::{Job, Stage};
+use crate::setup::{Part, Setup, State};
 use crate::gamepad::button_name;
 use crate::settings::{CameraSource, Filter, Keys, Language, PadButtons, Renderer, Screens, Settings, Stereo3d, TopShape};
 
@@ -62,6 +63,14 @@ pub enum Action {
     CheatsFolder,
     /// set the console's clock on, or back to the computer's.
     Clock(ClockChange),
+    /// pick the file for a part of setup.
+    SetupChoose(Part),
+    /// recompile the game from setup, downloading a compiler first when set.
+    SetupRecompile(bool),
+    /// show the folder setup fills.
+    SetupFolder,
+    /// start the game once setup has what it needs.
+    SetupStart,
 }
 
 /// how the clock window sets the console's clock.
@@ -959,6 +968,129 @@ impl Menus {
 
     /// asks whether to download a compiler, there being none to recompile
     /// with.
+    /// the first run of a folder made into a game of its own, which asks for
+    /// the files the game needs, see setup, and recompiles its code.
+    pub fn setup(&mut self, ui: &mut egui::Ui, setup: &Setup, name: &str, job: Option<&Job>) -> Vec<Action> {
+        let mut actions = Vec::new();
+        let green = Color32::from_rgb(90, 190, 110);
+        let red = Color32::from_rgb(230, 100, 90);
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.set_max_width(640.0);
+                ui.add_space(16.0);
+                ui.heading(format!("Set up {name}"));
+                ui.label(
+                    "The game and these files come from your own copy of the game and your own 3DS. \
+                     Choose each one, or drag them onto this window, and they're checked and copied into this folder.",
+                );
+                ui.add_space(10.0);
+            });
+            ui.vertical(|ui| {
+                ui.set_max_width(640.0);
+                for (part, state) in &setup.states {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            let (mark, color) = match state {
+                                State::Ready(_) => ("✔", green),
+                                State::Wrong(_) => ("✖", red),
+                                State::Missing if part.required() => ("✖", red),
+                                State::Missing => ("–", ui.visuals().weak_text_color()),
+                            };
+                            ui.label(RichText::new(mark).color(color).strong());
+                            ui.label(RichText::new(part.name()).strong());
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let copying = setup.copying() == Some(*part);
+                                if ui.add_enabled(!copying, egui::Button::new(if copying { "Copying…" } else { "Choose…" })).clicked() {
+                                    actions.push(Action::SetupChoose(*part));
+                                }
+                            });
+                        });
+                        let text = match state {
+                            State::Ready(about) => RichText::new(format!("Ready: {about}")).color(green),
+                            State::Missing if part.required() => RichText::new("Missing").color(red),
+                            State::Missing => RichText::new("Not added").weak(),
+                            State::Wrong(why) => RichText::new(format!("This file won't work: {why}")).color(red),
+                        };
+                        ui.label(text);
+                        ui.label(RichText::new(part.purpose()).weak());
+                        if !state.ready() {
+                            egui::CollapsingHeader::new("How to get it").id_salt(part.name()).show(ui, |ui| {
+                                ui.label(part.how());
+                            });
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+                // the code, recompiled for this computer
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        let (mark, color) = if setup.recompiled { ("✔", green) } else { ("–", ui.visuals().weak_text_color()) };
+                        ui.label(RichText::new(mark).color(color).strong());
+                        ui.label(RichText::new("Recompiled code").strong());
+                    });
+                    if setup.recompiled {
+                        ui.label(RichText::new("Ready: the game runs at full speed.").color(green));
+                    } else if setup.program_id.is_none() {
+                        ui.label(RichText::new("Once the game is in, its code can be recompiled for this computer.").weak());
+                    } else if let Some(job) = job.filter(|job| !job.stage().finished()) {
+                        progress(ui, job);
+                        ui.label(RichText::new("You can start the game meanwhile; it switches to the new code when this is done.").weak());
+                    } else if setup.recompiled_before {
+                        ui.label("This computer has the game's code recompiled from before.");
+                        if ui.button("Copy it into this folder").clicked() {
+                            actions.push(Action::SetupRecompile(false));
+                        }
+                    } else if setup.needs_compiler {
+                        let size = crate::zig::download_size().map_or_else(String::new, |size| format!(" ({} MB)", size / 1_000_000));
+                        ui.label("Recompiling needs a C compiler, and there isn't one on this computer. Zakuro can download Zig, which needs no installing.");
+                        if ui.button(format!("Download Zig{size} and recompile")).clicked() {
+                            actions.push(Action::SetupRecompile(true));
+                        }
+                    } else {
+                        ui.label(
+                            RichText::new("Recommended: turns the game's code into code for this computer, so it runs at full speed. It takes a while, once.")
+                                .weak(),
+                        );
+                        if ui.button("Recompile").clicked() {
+                            actions.push(Action::SetupRecompile(false));
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+                match &setup.last {
+                    Some((Some(part), Ok(about))) => {
+                        ui.label(RichText::new(format!("{} added: {about}", part.name())).color(green));
+                    }
+                    Some((part, Err(why))) => {
+                        let what = part.map_or_else(String::new, |part| format!("{}: ", part.name()));
+                        ui.label(RichText::new(format!("{what}{why}")).color(red));
+                    }
+                    _ => {}
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let ready = setup.ready();
+                    let start = ui.add_enabled(ready, egui::Button::new(RichText::new(format!("Start {name}")).strong()).min_size(Vec2::new(200.0, 32.0)));
+                    let start = match (ready, setup.recompiled) {
+                        (true, false) => start.on_hover_text("Without recompiled code it runs slower, recompile it when you can."),
+                        (false, _) => start.on_disabled_hover_text("Add the files marked ✖ first."),
+                        (true, true) => start,
+                    };
+                    if start.clicked() {
+                        actions.push(Action::SetupStart);
+                    }
+                    if ui.button("Open the folder").clicked() {
+                        actions.push(Action::SetupFolder);
+                    }
+                });
+                ui.add_space(16.0);
+            });
+        });
+        actions
+    }
+
     pub fn compiler_offer(&mut self, ctx: &egui::Context) -> Option<Action> {
         let index = self.compiler_offer?;
         let size = crate::zig::download_size().map_or_else(String::new, |size| format!(", {} MB to download and around 400 MB once unpacked", size / 1_000_000));
@@ -1023,7 +1155,6 @@ fn progress(ui: &mut egui::Ui, job: &Job) {
     ui.add(egui::ProgressBar::new(stage.fraction()).desired_width(220.0).text(format!("{text}, {minutes}:{seconds:02}")));
 }
 
-/// a key as a person would call it.
 /// how far the console's clock is from the computer's, for the clock
 /// window, "2 days, 3 hours ahead of this computer".
 fn clock_difference(ahead: i64) -> String {
@@ -1042,6 +1173,7 @@ fn clock_difference(ahead: i64) -> String {
     format!("{} {side} this computer", parts.join(", "))
 }
 
+/// a key as a person would call it.
 pub fn key_name(key: KeyCode) -> String {
     let name = format!("{key:?}");
     for prefix in ["Key", "Digit", "Arrow"] {

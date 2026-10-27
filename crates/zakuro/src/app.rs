@@ -3,13 +3,16 @@
 //! folder keeps everything the game needs and makes: its saves, the
 //! settings, the system files dumped from a console and the recompiled
 //! code. the folder can be moved or copied as one, and the program renamed
-//! after the game.
+//! after the game. a folder without the files yet opens on setup, which
+//! asks for them.
 //!
 //! ```toml
 //! # the game, relative to this folder or a full path
 //! game = "game/Tomodachi Life.3ds"
 //! # the window's name, the game's own when left out
 //! name = "Tomodachi Life"
+//! # the game's title id, which setup takes no other game for
+//! title_id = "000400000008C300"
 //! ```
 
 use std::path::PathBuf;
@@ -20,6 +23,7 @@ use std::sync::OnceLock;
 struct Manifest {
     game: PathBuf,
     name: Option<String>,
+    title_id: Option<String>,
 }
 
 pub struct App {
@@ -27,6 +31,8 @@ pub struct App {
     pub dir: PathBuf,
     pub game: PathBuf,
     pub name: Option<String>,
+    /// the game setup takes, none for any.
+    pub title_id: Option<u64>,
 }
 
 impl App {
@@ -47,17 +53,14 @@ fn load() -> Option<App> {
     let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
     let text = std::fs::read_to_string(dir.join("app.toml")).ok()?;
     let manifest: Manifest = toml::from_str(&text).unwrap_or_else(|error| fail(&format!("app.toml could not be read.\n\n{error}")));
-    Some(App { game: dir.join(&manifest.game), name: manifest.name, dir })
-}
-
-/// makes sure the game is where app.toml says, before any window opens.
-pub fn check(app: &App) {
-    if !app.game.is_file() {
-        fail(&format!(
-            "The game isn't where app.toml says it is:\n{}\n\nPut your own decrypted dump of the game there, or change `game` in app.toml.",
-            app.game.display()
-        ));
-    }
+    let title_id = match &manifest.title_id {
+        Some(id) => Some(
+            u64::from_str_radix(id.trim_start_matches("0x"), 16)
+                .unwrap_or_else(|_| fail(&format!("app.toml's title_id, {id}, isn't a title id like 000400000008C300."))),
+        ),
+        None => None,
+    };
+    Some(App { game: dir.join(&manifest.game), name: manifest.name, title_id, dir })
 }
 
 /// tells the player what stops the game from starting, in a window since a
