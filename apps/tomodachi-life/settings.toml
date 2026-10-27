@@ -1,0 +1,12 @@
+# The settings a new copy starts with: twice the 3DS's resolution, 60 frames
+# a second, the top screen at 16:9 with menus kept in proportion, and the
+# screens side by side. Change them in the game with Esc > Settings, which
+# writes the rest of the settings here too.
+resolution = 2
+frame_interpolation = true
+layout = "side_by_side"
+top_shape = "wide16x9"
+keep_2d = true
+
+[enhancements]
+000400000008C300 = ["Widescreen (16:9)"]

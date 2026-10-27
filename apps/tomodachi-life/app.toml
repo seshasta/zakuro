@@ -1,0 +1,9 @@
+# Makes this folder a game of its own: "Tomodachi Life.exe" starts the game
+# straight away and keeps everything in this folder.
+
+# the game, relative to this folder or a full path
+game = "game/TomodachiLife.3ds"
+# the window's name
+name = "Tomodachi Life"
+# the game's title id, which setup takes no other game for
+title_id = "000400000008C300"

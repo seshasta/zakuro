@@ -1,0 +1,3 @@
+# the files of a folder made into a game of its own are for Windows, and
+# its batch files misread without CRLF
+apps/** text=auto eol=crlf
