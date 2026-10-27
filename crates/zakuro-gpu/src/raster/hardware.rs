@@ -1640,11 +1640,12 @@ impl Hardware {
                 // integrated GPU does worse at it than the CPU, its draws
                 // read each vertex's inputs and uniforms out of storage
                 // buffers, a load after another. ZAKURO_GPU_SHADERS=1 has
-                // it shade all the same
+                // it shade all the same, as the tests do, which check the
+                // shading on whatever GPU they run on
                 shades: match (std::env::var_os("ZAKURO_CPU_SHADERS"), std::env::var_os("ZAKURO_GPU_SHADERS")) {
                     (Some(_), _) => false,
                     (None, Some(_)) => true,
-                    (None, None) => properties.device_type != vk::PhysicalDeviceType::INTEGRATED_GPU,
+                    (None, None) => cfg!(test) || properties.device_type != vk::PhysicalDeviceType::INTEGRATED_GPU,
                 },
                 // interpreting them all instead, to tell the two apart
                 translates: std::env::var_os("ZAKURO_INTERPRET_SHADERS").is_none(),
