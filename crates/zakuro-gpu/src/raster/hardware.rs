@@ -5463,7 +5463,7 @@ fn lacks(instance: &ash::Instance, device: vk::PhysicalDevice) -> Vec<&'static s
         lacks.push("depth clamping");
     }
     if !depth.optimal_tiling_features.contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT) {
-        lacks.push("a D24S8 depth format");
+        lacks.push("D24S8 depth format");
     }
     lacks
 }

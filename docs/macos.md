@@ -78,12 +78,24 @@ scales it differently for float formats. Most Windows GPUs also have
 D32S8, so all of this can be built and tested on this PC first, by forcing
 the float format with an environment variable.
 
-The CI job answers two questions. First, whether the runner's
-virtualized Apple GPU shows up through MoltenVK at all. GitHub says Metal
-Performance Shaders don't work in its macOS VMs, so it may not. Second,
-whether D24S8 is really what turns it down. Until the D32 path exists, the
-GPU tests on the Mac pass by skipping: each one returns early when it
-can't get a device.
+### What the first CI run showed
+
+[Run 40559165033](https://github.com/seshasta/zakuro/actions/runs/40559165033),
+on commit 146d5b1:
+
+- **Build and tests:** the program builds and links on the runner, an M1
+  under macOS. The tests pass: 46 in zakuro, 147 in zakuro-core and 175 in
+  zakuro-gpu, so the Cranelift JIT's shader tests pass on arm64.
+- **GPU:** the runner does have one. `vulkaninfo` shows "Apple Paravirtual
+  device" through MoltenVK 1.4.2, with Vulkan 1.4 and
+  `VK_KHR_portability_enumeration`.
+- **Why the renderer turns it down:**
+  `the_renderer_finds_a_gpu` fails with "Apple Paravirtual device has no …
+  D24S8 depth format", and nothing else is missing. So D24S8 is the only
+  blocker. Once the D32 path exists, the GPU tests can run for real in CI,
+  on the virtual GPU.
+- **Until then:** the GPU tests on the Mac pass by skipping, since each
+  one returns early when it can't get a device.
 
 ### Shader JIT (Cranelift)
 
