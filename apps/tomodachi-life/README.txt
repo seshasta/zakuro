@@ -27,7 +27,12 @@ First run
      use cbf_std.bcfnt.lz; it's converted for you.
   4. Press "Recompile". This turns the game's code into code for this PC so
      it runs at full speed. It takes a while, once. You can press Start and
-     play meanwhile; it switches over when it's done.
+     play meanwhile; it switches over when it's done. Without it the game
+     still runs, but slower, and the Miis' voices may stutter.
+     If this PC has no C compiler, setup offers to download Zig, one that
+     needs no installing. Already downloaded Zig yourself? It has to be
+     0.17.0: press "Use a Zig I downloaded..." and choose its zip (or
+     zig.exe, if you unzipped it), or drag the zip onto the window.
   5. Press "Start Tomodachi Life". From then on it starts straight into the
      game.
 

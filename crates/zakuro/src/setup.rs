@@ -147,6 +147,9 @@ pub struct Setup {
     /// recompiling needs a compiler downloaded, which the player is asked
     /// about.
     pub needs_compiler: bool,
+    /// a Zig the player downloaded themselves going in, on a thread of its
+    /// own, an archive takes a while to unpack.
+    adding_compiler: Option<std::thread::JoinHandle<Result<String, String>>>,
 }
 
 impl Setup {
@@ -160,6 +163,7 @@ impl Setup {
             waiting: Default::default(),
             last: None,
             needs_compiler: false,
+            adding_compiler: None,
         };
         setup.refresh(app);
         setup
@@ -192,8 +196,12 @@ impl Setup {
     }
 
     /// copies a file dropped on the window into the folder as whatever part
-    /// it is.
-    pub fn dropped(&mut self, app: &'static App, path: PathBuf) {
+    /// it is, or puts in a Zig to recompile with, into tools.
+    pub fn dropped(&mut self, app: &'static App, path: PathBuf, tools: Option<PathBuf>) {
+        if crate::zig::is_zig(&path) {
+            self.add_compiler(path, tools);
+            return;
+        }
         match identify(&path) {
             Some(part) => self.choose(app, part, path),
             None => {
@@ -203,8 +211,40 @@ impl Setup {
         }
     }
 
+    /// puts a Zig the player downloaded themselves into tools, see
+    /// zig::add, to recompile with.
+    pub fn add_compiler(&mut self, path: PathBuf, tools: Option<PathBuf>) {
+        if self.adding_compiler.is_some() {
+            return;
+        }
+        let Some(tools) = tools else {
+            self.last = Some((None, Err("Zakuro has nowhere to keep Zig on this computer.".to_owned())));
+            return;
+        };
+        log::info!("setup: Zig added from {}", path.display());
+        self.adding_compiler = Some(std::thread::spawn(move || {
+            crate::zig::add(&path, &tools).map(|_| "Zig is ready to recompile with.".to_owned()).map_err(|error| format!("Zig: {error}"))
+        }));
+    }
+
+    /// whether a Zig the player gave is going in.
+    pub fn adding_compiler(&self) -> bool {
+        self.adding_compiler.is_some()
+    }
+
     /// whether a copy finished since, the folder looked at again then.
     pub fn poll(&mut self, app: &'static App) -> bool {
+        if self.adding_compiler.as_ref().is_some_and(|thread| thread.is_finished()) {
+            if let Some(thread) = self.adding_compiler.take() {
+                let result = thread.join().unwrap_or_else(|_| Err("Zig: putting it in went wrong.".to_owned()));
+                if let Err(error) = &result {
+                    log::warn!("setup: {error}");
+                }
+                self.needs_compiler &= result.is_err();
+                self.last = Some((None, result));
+                return true;
+            }
+        }
         let Some((_, thread)) = &self.copying else { return false };
         if !thread.is_finished() {
             return false;

@@ -67,6 +67,8 @@ pub enum Action {
     SetupChoose(Part),
     /// recompile the game from setup, downloading a compiler first when set.
     SetupRecompile(bool),
+    /// pick a Zig the player downloaded themselves, to recompile with.
+    SetupCompiler,
     /// show the folder setup fills.
     SetupFolder,
     /// start the game once setup has what it needs.
@@ -966,8 +968,6 @@ impl Menus {
         action
     }
 
-    /// asks whether to download a compiler, there being none to recompile
-    /// with.
     /// the first run of a folder made into a game of its own, which asks for
     /// the files the game needs, see setup, and recompiles its code.
     pub fn setup(&mut self, ui: &mut egui::Ui, setup: &Setup, name: &str, job: Option<&Job>) -> Vec<Action> {
@@ -975,8 +975,11 @@ impl Menus {
         let green = Color32::from_rgb(90, 190, 110);
         let red = Color32::from_rgb(230, 100, 90);
         egui::ScrollArea::vertical().show(ui, |ui| {
+            // 640 wide, or as wide as a narrower window, which a wider column
+            // would run off both sides of
+            let column = ui.available_width().min(640.0);
             ui.vertical_centered(|ui| {
-                ui.set_max_width(640.0);
+                ui.set_max_width(column);
                 ui.add_space(16.0);
                 ui.heading(format!("Set up {name}"));
                 ui.label(
@@ -986,11 +989,11 @@ impl Menus {
                 ui.add_space(10.0);
             });
             // the column in the middle of a wide window
-            let margin = ((ui.available_width() - 640.0) / 2.0).max(0.0);
+            let margin = ((ui.available_width() - column) / 2.0).max(0.0);
             ui.horizontal_top(|ui| {
                 ui.add_space(margin);
                 ui.vertical(|ui| {
-                    ui.set_max_width(640.0);
+                    ui.set_max_width(column);
                     for (part, state) in &setup.states {
                         egui::Frame::group(ui.style()).show(ui, |ui| {
                             ui.set_width(ui.available_width());
@@ -1046,12 +1049,26 @@ impl Menus {
                             if ui.button("Copy it into this folder").clicked() {
                                 actions.push(Action::SetupRecompile(false));
                             }
+                        } else if setup.adding_compiler() {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("Putting Zig in, which takes a minute or two…");
+                            });
                         } else if setup.needs_compiler {
                             let size = crate::zig::download_size().map_or_else(String::new, |size| format!(" ({} MB)", size / 1_000_000));
                             ui.label("Recompiling needs a C compiler, and there isn't one on this computer. Zakuro can download Zig, which needs no installing.");
-                            if ui.button(format!("Download Zig{size} and recompile")).clicked() {
-                                actions.push(Action::SetupRecompile(true));
-                            }
+                            ui.horizontal(|ui| {
+                                if ui.button(format!("Download Zig{size} and recompile")).clicked() {
+                                    actions.push(Action::SetupRecompile(true));
+                                }
+                                if ui.button("Use a Zig I downloaded…").clicked() {
+                                    actions.push(Action::SetupCompiler);
+                                }
+                            });
+                            ui.label(
+                                RichText::new("Downloaded Zig yourself? It has to be Zig 0.17.0. Choose its zip, or zig.exe if you unzipped it, or drag either onto this window.")
+                                    .weak(),
+                            );
                         } else {
                             ui.label(
                                 RichText::new("Recommended: turns the game's code into code for this computer, so it runs at full speed. It takes a while, once.")
@@ -1066,6 +1083,9 @@ impl Menus {
                     match &setup.last {
                         Some((Some(part), Ok(about))) => {
                             ui.label(RichText::new(format!("{} added: {about}", part.name())).color(green));
+                        }
+                        Some((None, Ok(about))) => {
+                            ui.label(RichText::new(about).color(green));
                         }
                         Some((part, Err(why))) => {
                             let what = part.map_or_else(String::new, |part| format!("{}: ", part.name()));
@@ -1096,6 +1116,8 @@ impl Menus {
         actions
     }
 
+    /// asks whether to download a compiler, there being none to recompile
+    /// with.
     pub fn compiler_offer(&mut self, ctx: &egui::Context) -> Option<Action> {
         let index = self.compiler_offer?;
         let size = crate::zig::download_size().map_or_else(String::new, |size| format!(", {} MB to download and around 400 MB once unpacked", size / 1_000_000));

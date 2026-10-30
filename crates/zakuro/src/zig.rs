@@ -60,10 +60,82 @@ fn folder(tools: &Path) -> PathBuf {
     tools.join(format!("zig-{VERSION}"))
 }
 
-/// the compiler, when it has been downloaded into tools.
+/// the name of Zig's program.
+const PROGRAM: &str = if cfg!(windows) { "zig.exe" } else { "zig" };
+
+/// the compiler, when it has been downloaded into tools. without -g0 zig cc
+/// adds debug information, which made Tomodachi Life's objects four times
+/// the size and its library more than linking had memory for on a tester's
+/// computer.
 pub fn installed(tools: &Path) -> Option<Compiler> {
-    let program = folder(tools).join(if cfg!(windows) { "zig.exe" } else { "zig" });
-    program.is_file().then(|| Compiler::new(program, &["cc"]))
+    let program = folder(tools).join(PROGRAM);
+    program.is_file().then(|| Compiler::new(program, &["cc", "-g0"]))
+}
+
+/// whether a file dropped on the window is a Zig the player downloaded
+/// themselves: an archive of one, its folder unpacked, or its program.
+pub fn is_zig(path: &Path) -> bool {
+    let name = path.file_name().map(|name| name.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let archive = name.starts_with("zig-") && (name.ends_with(".zip") || name.contains(".tar."));
+    archive || name == PROGRAM || (path.is_dir() && path.join(PROGRAM).is_file())
+}
+
+/// puts a Zig the player downloaded themselves into tools, as download does
+/// the one it downloads: the archive Zakuro would have downloaded, checked
+/// the same way, or a Zig unpacked already, its folder or its program, of
+/// the same release, copied in.
+pub fn add(path: &Path, tools: &Path) -> Result<Compiler, String> {
+    let archive = archive().ok_or("Zakuro has no compiler for this system")?;
+    let link = format!("https://ziglang.org/download/{VERSION}/{}", archive.name);
+    std::fs::create_dir_all(tools).map_err(|error| format!("could not create {}, {error}", tools.display()))?;
+    if path.is_file() && !path.ends_with(PROGRAM) {
+        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        if let Err(error) = verify(path, &archive) {
+            return Err(if name.contains(VERSION) {
+                format!("{name} isn't the one ziglang.org gives ({error}), download it again from {link}")
+            } else {
+                format!("{name} isn't the Zig recompiling uses, it needs {}, from {link}", archive.name)
+            });
+        }
+        unpack(path, tools)?;
+    } else {
+        let dir = if path.is_dir() { path } else { path.parent().ok_or("this Zig has no folder")? };
+        let output = Command::new(dir.join(PROGRAM))
+            .arg("version")
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|error| format!("this Zig could not start, {error}"))?;
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if version != VERSION {
+            return Err(format!("this is Zig {version}, and recompiling needs Zig {VERSION}, from {link}"));
+        }
+        let staging = tools.join(format!("zig-{VERSION}.unpacking"));
+        let _ = std::fs::remove_dir_all(&staging);
+        let copied = copy_tree(dir, &staging);
+        if let Err(error) = copied {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!("could not copy it, {error}"));
+        }
+        let target = folder(tools);
+        let _ = std::fs::remove_dir_all(&target);
+        std::fs::rename(&staging, &target).map_err(|error| error.to_string())?;
+    }
+    installed(tools).ok_or_else(|| "Zig was put in but its zig program is missing".to_owned())
+}
+
+/// copies the folder from and all in it to to.
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
 }
 
 /// the program downloads go through, curl, which Linux, macOS and Windows
@@ -239,7 +311,7 @@ fn unpack(archive: &Path, tools: &Path) -> Result<(), String> {
     let staging = tools.join(format!("zig-{VERSION}.unpacking"));
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
-    let xz = archive.to_string_lossy().ends_with(".tar.xz.part");
+    let xz = archive.to_string_lossy().contains(".tar.xz");
     let status = Command::new("tar")
         .arg(if xz { "-xJf" } else { "-xf" })
         .arg(archive)
@@ -278,11 +350,36 @@ mod tests {
     fn a_downloaded_zig_is_called_as_zig_cc() {
         let tools = std::env::temp_dir().join(format!("zakuro-zig-{}", std::process::id()));
         assert!(installed(&tools).is_none());
-        let program = folder(&tools).join(if cfg!(windows) { "zig.exe" } else { "zig" });
+        let program = folder(&tools).join(PROGRAM);
         std::fs::create_dir_all(program.parent().unwrap()).unwrap();
         std::fs::write(&program, b"").unwrap();
-        assert_eq!(installed(&tools), Some(Compiler::new(&program, &["cc"])));
+        assert_eq!(installed(&tools), Some(Compiler::new(&program, &["cc", "-g0"])));
         std::fs::remove_dir_all(tools).unwrap();
+    }
+
+    #[test]
+    fn a_zig_downloaded_by_hand_is_told_from_other_files() {
+        assert!(is_zig(Path::new("zig-x86_64-windows-0.17.0.zip")));
+        assert!(is_zig(Path::new("zig-x86_64-linux-0.17.0.tar.xz")));
+        assert!(is_zig(Path::new("Zig-x86_64-windows-0.18.0 (1).zip")));
+        assert!(is_zig(&Path::new("downloads").join(PROGRAM)));
+        assert!(!is_zig(Path::new("Tomodachi Life.3ds")));
+        assert!(!is_zig(Path::new("zigzag.png")));
+    }
+
+    #[test]
+    fn a_zig_archive_of_another_release_says_which_to_get() {
+        let dir = std::env::temp_dir().join(format!("zakuro-zig-added-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let other = dir.join("zig-x86_64-windows-0.13.0.zip");
+        std::fs::write(&other, b"abc").unwrap();
+        let error = add(&other, &dir.join("tools")).unwrap_err();
+        assert!(error.contains(archive().unwrap().name) && error.contains("https://ziglang.org/download/0.17.0/"), "{error}");
+        let damaged = dir.join(archive().unwrap().name);
+        std::fs::write(&damaged, b"abc").unwrap();
+        assert!(add(&damaged, &dir.join("tools")).unwrap_err().contains("download it again"));
+        assert!(installed(&dir.join("tools")).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

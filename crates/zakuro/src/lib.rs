@@ -633,7 +633,7 @@ impl ApplicationHandler for App {
             // a file dropped on setup is one it asks for, on a game a
             // picture for the cameras
             WindowEvent::DroppedFile(path) => match (&mut self.setup, app::get()) {
-                (Some(setup), Some(app)) if self.game.is_none() => setup.dropped(app, path),
+                (Some(setup), Some(app)) if self.game.is_none() => setup.dropped(app, path, zig::tools_dir(self.data_dir.as_deref())),
                 _ => self.show_cameras(path),
             },
             _ => {}
@@ -1142,6 +1142,17 @@ impl App {
         }
     }
 
+    /// picks a Zig the player downloaded themselves, for setup to recompile
+    /// with.
+    fn setup_compiler(&mut self) {
+        let picked = self.file_dialog().set_title("Choose the Zig you downloaded").add_filter("Zig", &["zip", "xz", "exe"]).pick_file();
+        log::info!("setup: Zig chosen as {picked:?}");
+        let tools = zig::tools_dir(self.data_dir.as_deref());
+        if let (Some(setup), Some(path)) = (&mut self.setup, picked) {
+            setup.add_compiler(path, tools);
+        }
+    }
+
     /// a dialog for picking files over the window, which it keeps in front
     /// of it, one on its own can open behind it.
     fn file_dialog(&self) -> rfd::FileDialog {
@@ -1368,6 +1379,7 @@ impl App {
             Action::Clock(change) => self.move_clock(change),
             Action::SetupChoose(part) => self.setup_choose(part),
             Action::SetupRecompile(download) => self.recompile_app(download),
+            Action::SetupCompiler => self.setup_compiler(),
             Action::SetupFolder => {
                 if let Some(app) = app::get() {
                     show_folder(&app.dir);
