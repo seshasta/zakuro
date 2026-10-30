@@ -73,9 +73,12 @@ impl log::Log for Logger {
 }
 
 /// logs what RUST_LOG asks for, info and up without it, and puts a panic in
-/// the file as well, the terminal shows it as it always has.
+/// the file as well, the terminal shows it as it always has. cranelift logs
+/// every function the JIT makes, its whole IR, at info, which buried the log
+/// and the lines a report takes, so it says only warnings unless asked.
 pub fn init() {
-    let terminal = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).build();
+    let filter = "info,cranelift_jit=warn,cranelift_codegen=warn";
+    let terminal = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(filter)).build();
     let level = terminal.filter();
     let started = Instant::now();
     if log::set_boxed_logger(Box::new(Logger { terminal, started })).is_ok() {
